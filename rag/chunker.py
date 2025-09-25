@@ -2,7 +2,6 @@ import torch
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple
 from threading import Lock
-import uuid
 from langchain.embeddings import HuggingFaceBgeEmbeddings
 from langchain_community.utils.math import cosine_similarity
 from tqdm import tqdm
@@ -43,7 +42,6 @@ class MultiThreadedChunker:
                     "chunk_id": chunk_id,
                     "text": chunk_text,
                     "chunk_size": len(chunk_text.encode("utf-8")),
-                    "unique_id": str(uuid.uuid4())
                 }
                 results.append((embeddings[i], payload))
             

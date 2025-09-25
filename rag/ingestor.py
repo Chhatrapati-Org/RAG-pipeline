@@ -39,16 +39,12 @@ class MultiThreadedFileReader:
                     
                     # Ensure chunk doesn't exceed size limit
                     content_bytes = content.encode("utf-8")
-                    if len(content_bytes) > self.chunk_size_bytes:
-                        content = content[:self.chunk_size_bytes]
+                    while len(content_bytes) > self.chunk_size_bytes:
+                        chunklet = content[:self.chunk_size_bytes]
+                        content = content[self.chunk_size_bytes:]
                         content_bytes = content.encode("utf-8")
-                        # Find a safe cut point (avoid cutting mid-word)
-                        while len(content_bytes) > self.chunk_size_bytes:
-                            content = content[:-1]
-                            content_bytes = content.encode("utf-8")
-                    
-                    chunks.append((content, filename, chunk_id))
-                    chunk_id += 1
+                        chunks.append((chunklet, filename, chunk_id))
+                        chunk_id += 1
                     
         except Exception as e:
             print(f"Error reading {filename}: {e}")
