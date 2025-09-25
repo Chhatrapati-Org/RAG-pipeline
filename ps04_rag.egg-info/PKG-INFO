@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: ps04-rag
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.13
+Description-Content-Type: text/markdown
+Requires-Dist: langchain>=0.3.27
+Requires-Dist: langchain-community>=0.3.29
+Requires-Dist: langchain-experimental>=0.3.4
+Requires-Dist: pandas>=2.3.2
+Requires-Dist: qdrant-client>=1.15.1
+Requires-Dist: tqdm>=4.67.1

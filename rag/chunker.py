@@ -1,68 +1,88 @@
 import torch
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Tuple
+from threading import Lock
+import uuid
 from langchain.embeddings import HuggingFaceBgeEmbeddings
 from langchain_community.utils.math import cosine_similarity
 from tqdm import tqdm
 
 
-def text_chunker(sentences):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+class MultiThreadedChunker:
+    def __init__(self, max_workers=4, model_name="jinaai/jina-embeddings-v2-small-en"):
+        self.max_workers = max_workers
+        self.model_name = model_name
+        self.model = None
+        self.lock = Lock()
+        self._initialize_model()
 
-    model_kwargs = {"device": device}
+    def _initialize_model(self):
+        """Initialize the embedding model."""
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {device}")
 
-    encode_kwargs = {"normalize_embeddings": True}
+        model_kwargs = {"device": device}
+        encode_kwargs = {"normalize_embeddings": True}
 
-    model = HuggingFaceBgeEmbeddings(
-        model_name="jinaai/jina-embeddings-v2-small-en",
-        model_kwargs=model_kwargs,
-        encode_kwargs=encode_kwargs,
-    )
-    texts_to_embed = [x["combined_sent"] for x in sentences]
-    all_embeddings = model.embed_documents(texts_to_embed)
+        self.model = HuggingFaceBgeEmbeddings(
+            model_name=self.model_name,
+            model_kwargs=model_kwargs,
+            encode_kwargs=encode_kwargs,
+        )
 
-    print("Embeddings for semantic checking of neighbouring sentences")
+    def _embed_chunk_batch(self, chunks_batch: List[Tuple[str, str, int]]) -> List[Tuple[List[float], dict]]:
+        """Embed a batch of chunks and return embeddings with metadata."""
+        try:
+            texts = [chunk[0] for chunk in chunks_batch]
+            embeddings = self.model.embed_documents(texts)
+            
+            results = []
+            for i, (chunk_text, filename, chunk_id) in enumerate(chunks_batch):
+                payload = {
+                    "filename": filename,
+                    "chunk_id": chunk_id,
+                    "text": chunk_text,
+                    "chunk_size": len(chunk_text.encode("utf-8")),
+                    "unique_id": str(uuid.uuid4())
+                }
+                results.append((embeddings[i], payload))
+            
+            return results
+        except Exception as e:
+            print(f"Error embedding batch: {e}")
+            return []
 
-    for i, sentence in enumerate(sentences):
-        sentence["combined_embed"] = all_embeddings[i]
+    def process_chunks_multithreaded(self, chunks: List[Tuple[str, str, int]], batch_size=32) -> List[Tuple[List[float], dict]]:
+        """Process chunks in parallel batches for embedding."""
+        if not chunks:
+            return []
 
-    distances = []
-    for i in tqdm(range(len(sentences) - 1), desc="Calculating distances"):
+        # Group chunks into batches for efficient embedding
+        batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
+        
+        all_results = []
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all batches for processing
+            future_to_batch = {
+                executor.submit(self._embed_chunk_batch, batch): batch 
+                for batch in batches
+            }
+            
+            # Process completed batches as they finish
+            with tqdm(total=len(batches), desc="Embedding chunks") as pbar:
+                for future in as_completed(future_to_batch):
+                    try:
+                        results = future.result()
+                        all_results.extend(results)
+                    except Exception as e:
+                        print(f"Error processing batch: {e}")
+                    finally:
+                        pbar.update(1)
+        
+        return all_results
 
-        current = all_embeddings[i]
-        next = all_embeddings[i + 1]
+    def chunker(self, chunks: List[Tuple[str, str, int]]) -> List[Tuple[List[float], dict]]:
+        """Main chunker function that processes chunks and returns embeddings with payloads."""
+        return self.process_chunks_multithreaded(chunks)
 
-        similarity = cosine_similarity([current], [next])[0][0]
-
-        distances.append(1 - similarity)
-        sentences[i]["distance_to_next"] = distances[i]
-
-    breakpoint_distance_threshold = 0.333
-
-    indices_above_thresh = [
-        i for i, x in enumerate(distances) if x > breakpoint_distance_threshold
-    ]
-
-    chunks = []
-    pre = 0
-    for i in tqdm(range(len(indices_above_thresh)), desc="Creating text chunks"):
-        post = indices_above_thresh[i]
-        combined = ""
-        for j in range(pre, post):
-            combined += " " + sentences[j]["sentence"]
-
-        MAX_LENGTH = 500 * 5
-        while len(combined) > MAX_LENGTH:
-            chunk = combined[:MAX_LENGTH]
-            chunks.append(chunk)
-            combined = combined[MAX_LENGTH:]
-        chunks.append(combined)
-
-        pre = post
-
-    if pre < len(sentences):
-        combined = ""
-        for i in range(pre, len(sentences)):
-            combined += " " + sentences[i]["sentence"]
-        chunks.append(combined)
-
-    return chunks
