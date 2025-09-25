@@ -34,9 +34,17 @@ All Threads: [Read All Files] → [Embed All Chunks] → [Store All]
 # Install dependencies
 pip install -e .
 
-# Start Qdrant server (required)
-docker run -p 6333:6333 qdrant/qdrant
+# Set up Qdrant (multiple options - no Docker required)
+# See QDRANT_SETUP.md for detailed instructions
 ```
+
+**🔧 Qdrant Setup Options:**
+- **Qdrant Cloud** (Recommended): Free tier, no installation
+- **Local Binary**: Download and run qdrant.exe  
+- **File-Based**: No server, stores data in files
+- **In-Memory**: For testing only
+
+See [QDRANT_SETUP.md](QDRANT_SETUP.md) for step-by-step instructions.
 
 ### Basic Usage
 

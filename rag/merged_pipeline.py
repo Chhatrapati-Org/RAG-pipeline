@@ -1,50 +1,161 @@
 import os
 import re
 import torch
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from threading import Lock
-from pathlib import Path
 
-from langchain.embeddings import HuggingFaceBgeEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from tqdm import tqdm
 
 from rag.qdrant import client
 
-COLLECTION_NAME = "ps04"
+COLLECTION_NAME = "ps04-merged"
 
-# Initialize collection if it doesn't exist
-if not client.collection_exists(COLLECTION_NAME):
-    client.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=512, distance=Distance.COSINE),
-    )
+
+class SharedEmbeddingModel:
+    """Singleton class for shared embedding model across all threads."""
+    
+    _instance = None
+    _model = None
+    _lock = Lock()
+    _initialized = False
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(SharedEmbeddingModel, cls).__new__(cls)
+        return cls._instance
+    
+    def initialize_model(self, model_name: str = "jinaai/jina-embeddings-v2-small-en"):
+        """Initialize the shared model with proper error handling."""
+        with self._lock:
+            if self._initialized and self._model is not None:
+                return self._model
+            
+            print(f"Initializing shared embedding model: {model_name}")
+            
+            try:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                print(f"Using device: {device}")
+                
+                # Try with minimal configuration to avoid meta tensor issues
+                model_kwargs = {"device": device}
+                encode_kwargs = {"normalize_embeddings": True}
+                
+                try:
+                    self._model = HuggingFaceEmbeddings(
+                        model_name=model_name,
+                        model_kwargs=model_kwargs,
+                        encode_kwargs=encode_kwargs,
+                    )
+                    print("✅ Shared model initialized successfully")
+                    
+                except Exception as primary_error:
+                    print(f"Primary initialization failed: {primary_error}")
+                    print("Trying CPU-only initialization...")
+                    
+                    # Fallback to CPU-only
+                    model_kwargs = {"device": "cpu"}
+                    self._model = HuggingFaceEmbeddings(
+                        model_name=model_name,
+                        model_kwargs=model_kwargs,
+                        encode_kwargs=encode_kwargs,
+                    )
+                    print("✅ Shared model initialized on CPU")
+                
+                # Test the model with a sample text
+                test_embedding = self._model.embed_documents(["Test sentence"])
+                vector_size = len(test_embedding[0])
+                print(f"✅ Model produces {vector_size}-dimensional vectors")
+                
+                # Initialize Qdrant collection with correct vector size
+                initialize_collection_if_needed(vector_size)
+                
+                self._initialized = True
+                return self._model
+                
+            except Exception as e:
+                print(f"❌ Failed to initialize shared model: {e}")
+                # Try alternative model as last resort
+                try:
+                    print("Trying alternative model as fallback...")
+                    model_kwargs = {"device": "cpu"}
+                    encode_kwargs = {"normalize_embeddings": True}
+                    
+                    self._model = HuggingFaceEmbeddings(
+                        model_name="sentence-transformers/all-MiniLM-L6-v2",
+                        model_kwargs=model_kwargs,
+                        encode_kwargs=encode_kwargs,
+                    )
+                    
+                    # Test and setup collection
+                    test_embedding = self._model.embed_documents(["Test sentence"])
+                    vector_size = len(test_embedding[0])
+                    print(f"✅ Fallback model produces {vector_size}-dimensional vectors")
+                    initialize_collection_if_needed(vector_size)
+                    
+                    self._initialized = True
+                    return self._model
+                    
+                except Exception as final_error:
+                    print(f"❌ All model initialization attempts failed: {final_error}")
+                    raise RuntimeError("Cannot initialize any embedding model")
+    
+    def get_model(self):
+        """Get the initialized shared model."""
+        if not self._initialized or self._model is None:
+            raise RuntimeError("Model not initialized. Call initialize_model() first.")
+        return self._model
+    
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Thread-safe embedding method."""
+        with self._lock:
+            model = self.get_model()
+            return model.embed_documents(texts)
+
+
+def initialize_collection_if_needed(vector_size: int):
+    """Initialize collection with the correct vector size."""
+    if not client.collection_exists(COLLECTION_NAME):
+        print(f"Creating Qdrant collection '{COLLECTION_NAME}' with vector size {vector_size}")
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+        )
+    else:
+        # Check if existing collection has correct vector size
+        try:
+            collection_info = client.get_collection(COLLECTION_NAME)
+            existing_size = collection_info.config.params.vectors.size
+            if existing_size != vector_size:
+                print(f"Warning: Existing collection has vector size {existing_size}, but model produces {vector_size}")
+                print(f"Deleting existing collection and recreating with correct size...")
+                client.delete_collection(COLLECTION_NAME)
+                client.create_collection(
+                    collection_name=COLLECTION_NAME,
+                    vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+                )
+        except Exception as e:
+            print(f"Error checking collection: {e}")
 
 
 class MergedRAGWorker:
-    """A single worker that handles the complete pipeline for a batch of files."""
+    """A single worker that handles the complete pipeline for a batch of files using shared model."""
     
-    def __init__(self, worker_id: int, chunk_size_kb: int = 4, model_name: str = "jinaai/jina-embeddings-v2-small-en"):
+    def __init__(self, worker_id: int, chunk_size_kb: int = 4, shared_model: SharedEmbeddingModel = None):
         self.worker_id = worker_id
         self.chunk_size_bytes = chunk_size_kb * 1024
-        self.model_name = model_name
-        self.model = None
+        self.shared_model = shared_model or SharedEmbeddingModel()
         self.point_id_counter = worker_id * 10000  # Unique ID range per worker
-        self._initialize_model()
+        print(f"Worker {self.worker_id}: Initialized with shared model")
     
-    def _initialize_model(self):
-        """Initialize embedding model for this worker."""
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model_kwargs = {"device": device}
-        encode_kwargs = {"normalize_embeddings": True}
-        
-        self.model = HuggingFaceBgeEmbeddings(
-            model_name=self.model_name,
-            model_kwargs=model_kwargs,
-            encode_kwargs=encode_kwargs,
-        )
+    def get_model(self):
+        """Get the shared model instance."""
+        return self.shared_model.get_model()
+    
     
     def _read_file_chunks(self, file_path: str) -> List[Tuple[str, str, int]]:
         """Read a file and return chunks with metadata."""
@@ -97,41 +208,113 @@ class MergedRAGWorker:
         return chunks
     
     def _embed_chunks(self, chunks: List[Tuple[str, str, int]]) -> List[Tuple[List[float], Dict[str, Any]]]:
-        """Embed chunks and create payloads."""
+        """Embed chunks and create payloads with robust error handling."""
         if not chunks:
             return []
         
         try:
             texts = [chunk[0] for chunk in chunks]
-            embeddings = self.model.embed_documents(texts)
+            
+            # Validate texts before embedding
+            if not texts or any(not text.strip() for text in texts):
+                print(f"Worker {self.worker_id}: Warning - some texts are empty or whitespace-only")
+                # Filter out empty texts
+                valid_chunks = [(text, filename, chunk_id) for text, filename, chunk_id in chunks if text.strip()]
+                if not valid_chunks:
+                    print(f"Worker {self.worker_id}: No valid texts to embed")
+                    return []
+                texts = [chunk[0] for chunk in valid_chunks]
+                chunks = valid_chunks
+            
+            print(f"Worker {self.worker_id}: Embedding {len(texts)} text chunks...")
+            
+            # Try embedding with error handling using shared model
+            try:
+                embeddings = self.shared_model.embed_documents(texts)
+                ##### print(embeddings[0])
+                if not embeddings or len(embeddings) != len(texts):
+                    print(f"Worker {self.worker_id}: Embedding count mismatch - expected {len(texts)}, got {len(embeddings) if embeddings else 0}")
+                    return []
+                    
+            except RuntimeError as rt_error:
+                if "meta tensor" in str(rt_error).lower():
+                    print(f"Worker {self.worker_id}: Meta tensor error detected with shared model: {rt_error}")
+                    # With shared model, we can't reinitialize per worker - just re-raise
+                    raise rt_error
+                else:
+                    raise rt_error
             
             results = []
             for i, (chunk_text, filename, chunk_id) in enumerate(chunks):
                 payload = {
                     "filename": filename,
                     "chunk_id": chunk_id,
-                    "text": chunk_text,
+                    "text": chunk_text[:500] + "..." if len(chunk_text) > 500 else chunk_text,  # Truncate for storage
                     "chunk_size": len(chunk_text.encode("utf-8")),
-                    "unique_id": str(uuid.uuid4()),
-                    "worker_id": self.worker_id
+                    "worker_id": self.worker_id,
+                    "text_length": len(chunk_text)
                 }
                 results.append((embeddings[i], payload))
             
+            print(f"Worker {self.worker_id}: Successfully embedded {len(results)} chunks")
             return results
             
         except Exception as e:
             print(f"Worker {self.worker_id}: Error embedding chunks: {e}")
+            print(f"Worker {self.worker_id}: Error type: {type(e).__name__}")
+            
+            # Try fallback approach - embed one at a time
+            print(f"Worker {self.worker_id}: Attempting fallback individual embedding...")
+            try:
+                results = []
+                for chunk_text, filename, chunk_id in chunks:
+                    try:
+                        embedding = self.shared_model.embed_documents([chunk_text])
+                        if embedding and len(embedding) > 0:
+                            payload = {
+                                "filename": filename,
+                                "chunk_id": chunk_id,
+                                "text": chunk_text[:500] + "..." if len(chunk_text) > 500 else chunk_text,
+                                "chunk_size": len(chunk_text.encode("utf-8")),
+                                "worker_id": self.worker_id,
+                                "text_length": len(chunk_text)
+                            }
+                            results.append((embedding[0], payload))
+                    except Exception as single_error:
+                        print(f"Worker {self.worker_id}: Failed to embed individual chunk from {filename}: {single_error}")
+                        continue
+                
+                if results:
+                    print(f"Worker {self.worker_id}: Fallback embedding succeeded for {len(results)} chunks")
+                    return results
+                    
+            except Exception as fallback_error:
+                print(f"Worker {self.worker_id}: Fallback embedding also failed: {fallback_error}")
+            
             return []
     
     def _store_embeddings(self, embeddings_with_payloads: List[Tuple[List[float], Dict[str, Any]]]) -> int:
-        """Store embeddings in Qdrant."""
+        """Store embeddings in Qdrant with dynamic vector size detection."""
         if not embeddings_with_payloads:
             return 0
         
         try:
+            # Detect vector size from first embedding
+            first_embedding = embeddings_with_payloads[0][0]
+            vector_size = len(first_embedding)
+            
+            # Initialize collection with correct vector size
+            initialize_collection_if_needed(vector_size)
+            
             points = []
             for embedding, payload in embeddings_with_payloads:
                 self.point_id_counter += 1
+                
+                # Validate embedding size
+                if len(embedding) != vector_size:
+                    print(f"Worker {self.worker_id}: Warning - embedding size mismatch: expected {vector_size}, got {len(embedding)}")
+                    continue
+                
                 points.append(
                     PointStruct(
                         id=self.point_id_counter,
@@ -140,11 +323,16 @@ class MergedRAGWorker:
                     )
                 )
             
+            if not points:
+                print(f"Worker {self.worker_id}: No valid points to store")
+                return 0
+            
             client.upsert(
                 collection_name=COLLECTION_NAME,
                 points=points,
             )
             
+            print(f"Worker {self.worker_id}: Successfully stored {len(points)} embeddings (vector size: {vector_size})")
             return len(points)
             
         except Exception as e:
@@ -209,6 +397,13 @@ class MergedMultiThreadedRAGPipeline:
             "embeddings_stored": 0,
             "errors": 0
         }
+        
+        # Initialize shared model instance
+        print("Initializing shared embedding model...")
+        self.shared_model = SharedEmbeddingModel()
+        # Actually initialize the model
+        self.shared_model.initialize_model()
+        print("Shared embedding model initialized successfully")
     
     def _create_file_batches(self, directory_path: str) -> List[List[str]]:
         """Create batches of files for processing."""
@@ -244,7 +439,8 @@ class MergedMultiThreadedRAGPipeline:
         worker_id, file_paths = batch_info
         worker = MergedRAGWorker(
             worker_id=worker_id,
-            chunk_size_kb=self.chunk_size_kb
+            chunk_size_kb=self.chunk_size_kb,
+            shared_model=self.shared_model
         )
         
         stats = worker.process_file_batch(file_paths)

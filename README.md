@@ -23,9 +23,12 @@ A high-performance, multithreaded Retrieval-Augmented Generation (RAG) pipeline 
 # Install dependencies
 pip install -e .
 
-# Start Qdrant server (required for embedding storage)
-docker run -p 6333:6333 qdrant/qdrant
+# Set up Qdrant (multiple options available - see QDRANT_SETUP.md)
+# Recommended: Qdrant Cloud (free, no installation)
+# Alternative: Local binary, file storage, or in-memory
 ```
+
+**📋 For detailed Qdrant setup instructions, see [QDRANT_SETUP.md](QDRANT_SETUP.md)**
 
 ### Basic Usage
 
@@ -161,8 +164,10 @@ ps04-rag-v2/
 ### Common Issues
 
 1. **Qdrant Connection Error**
-   - Ensure Qdrant server is running on localhost:6333
-   - Check firewall settings
+   - **Option 1**: Use Qdrant Cloud (https://cloud.qdrant.io) - free tier available
+   - **Option 2**: Download Qdrant binary from GitHub releases and run locally
+   - **Option 3**: Use the in-memory alternative (see setup instructions below)
+   - Check firewall settings if using local installation
 
 2. **Memory Issues**  
    - Reduce `embedding_batch_size` and `storage_batch_size`

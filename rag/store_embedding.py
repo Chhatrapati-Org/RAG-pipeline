@@ -3,13 +3,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple, Dict, Any
 from threading import Lock
 import uuid
-from langchain.embeddings import HuggingFaceBgeEmbeddings
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from tqdm import tqdm
 
 from rag.qdrant import client
 
-COLLECTION_NAME = "ps04"
+COLLECTION_NAME = "ps04-fragmented"
 
 # Initialize collection if it doesn't exist
 if not client.collection_exists(COLLECTION_NAME):
