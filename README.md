@@ -23,6 +23,8 @@ A high-performance, multithreaded Retrieval-Augmented Generation (RAG) pipeline 
 # Install dependencies
 pip install -e .
 
+# Start Qdrant server (required for embedding storage)
+docker run -p 6333:6333 qdrant/qdrant
 # Set up Qdrant (multiple options available - see QDRANT_SETUP.md)
 # Recommended: Qdrant Cloud (free, no installation)
 # Alternative: Local binary, file storage, or in-memory

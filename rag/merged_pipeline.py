@@ -1,8 +1,9 @@
 import os
 import re
 import torch
+import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, Generator
 from threading import Lock
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -11,7 +12,9 @@ from tqdm import tqdm
 
 from rag.qdrant import client
 
-COLLECTION_NAME = "ps04-merged"
+now = datetime.datetime.now()
+formatted_now = now.strftime("%d-%m-%Y %H")
+COLLECTION_NAME = "ps04-"+formatted_now
 
 
 class SharedEmbeddingModel:
@@ -142,6 +145,19 @@ def initialize_collection_if_needed(vector_size: int):
             print(f"Error checking collection: {e}")
 
 
+
+def preprocess_text(text: str) -> str:
+    """Basic text preprocessing to clean and normalize."""
+    text = re.sub(r"\[|\]|\{|\}|\\n|\\", " ", text) # remove garbage json symbols 
+    text = re.sub(r"\.\.+", "", text) # remove multiple dots
+    # text = re.sub(r"(?<=\bhttps?://[^\s]+)(/[^\s]+)+", "", text) # remove sub domains r"\bhttps?://[^\s]+\b" "(/[^\s]+)+"
+    text = re.sub(r"<[^>]+>", "", text) # remove HTML tags
+    text = re.sub(r":\s*(null|NULL|Null|None|NONE|none),?", " is empty,", text)  # remove key with null values
+    text = re.sub(r": ", " is ", text) # humanize key-value pairs
+    text = re.sub(r"\s+", " ", text)  # Collapse whitespace
+    text = text.strip()
+    return text
+
 class MergedRAGWorker:
     """A single worker that handles the complete pipeline for a batch of files using shared model."""
     
@@ -157,55 +173,52 @@ class MergedRAGWorker:
         return self.shared_model.get_model()
     
     
-    def _read_file_chunks(self, file_path: str) -> List[Tuple[str, str, int]]:
-        """Read a file and return chunks with metadata."""
+    def _read_file_chunks(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
+        """
+        Read a file and yield chunks of text, splitting on word boundaries.
+
+        Yields:
+            Generator[Tuple[str, str, int], None, None]: A generator that yields
+            tuples of (chunk_text, filename, chunk_id).
+        """
         filename = os.path.basename(file_path)
-        chunks = []
-        
+        chunk_id = 0
+
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                _, ext = os.path.splitext(filename)
-                chunk_id = 0
-                
+                leftover = ""
                 while True:
-                    content = f.read(self.chunk_size_bytes)
-                    if not content:
+                    # Read a new chunk from the file
+                    chunk = f.read(self.chunk_size_bytes)
+                    
+                    # If the file is exhausted, yield any remaining text and stop
+                    if not chunk:
+                        if leftover:
+                            yield (leftover, filename, chunk_id)
                         break
+
+                    # Combine the leftover from the previous iteration with the new chunk
+                    data = preprocess_text(leftover + chunk)
                     
-                    # Clean JSON content
-                    if ext.lower() == ".json":
-                        content = re.sub(
-                            r"[\[\]\{\}\"\n]",
-                            "",
-                            re.sub(r"\s[\s]+", " ", re.sub(r"\\[nrt]", "", content)),
-                        )
-                    
-                    # Ensure chunk doesn't exceed size limit
-                    content_bytes = content.encode("utf-8")
-                    if len(content_bytes) > self.chunk_size_bytes:
-                        # Split content to fit within limit
-                        while len(content_bytes) > self.chunk_size_bytes:
-                            split_point = self.chunk_size_bytes
-                            # Try to find a word boundary
-                            while split_point > 0 and content[split_point] != ' ':
-                                split_point -= 1
-                            if split_point == 0:  # No word boundary found
-                                split_point = self.chunk_size_bytes
-                            
-                            chunk_part = content[:split_point]
-                            chunks.append((chunk_part, filename, chunk_id))
-                            chunk_id += 1
-                            content = content[split_point:].lstrip()
-                            content_bytes = content.encode("utf-8")
-                    
-                    if content:  # Add remaining content if any
-                        chunks.append((content, filename, chunk_id))
-                        chunk_id += 1
+                    # Find the last space to safely split the text
+                    split_point = data.rfind(' ')
+
+                    # If a space is found, we can split
+                    if split_point != -1:
+                        chunk_to_yield = data[:split_point]
+                        leftover = data[split_point:].lstrip() # Keep the rest for the next iteration
                         
+                        yield (chunk_to_yield, filename, chunk_id)
+                        chunk_id += 1
+                    
+                    # If no space is found (e.g., a very long word), keep it for the next chunk
+                    else:
+                        leftover = data
+
         except Exception as e:
             print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
-            
-        return chunks
+
+        
     
     def _embed_chunks(self, chunks: List[Tuple[str, str, int]]) -> List[Tuple[List[float], Dict[str, Any]]]:
         """Embed chunks and create payloads with robust error handling."""
@@ -352,7 +365,8 @@ class MergedRAGWorker:
         for file_path in file_paths:
             try:
                 # Step 1: Read file and create chunks
-                chunks = self._read_file_chunks(file_path)
+                chunks_generator = self._read_file_chunks(file_path)
+                chunks = list(chunks_generator)  # Convert generator to list for multiple passes
                 if not chunks:
                     continue
                 
