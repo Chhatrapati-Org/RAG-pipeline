@@ -1,0 +1,4 @@
+retrieval_results.json
+logs/
+.venv/*
+*.egg*
