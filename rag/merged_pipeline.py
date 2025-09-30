@@ -129,18 +129,14 @@ def initialize_collection_if_needed(vector_size: int):
             vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
         )
     else:
-        # Check if existing collection has correct vector size
+        # Deleting existing collection and creating new
         try:
-            collection_info = client.get_collection(COLLECTION_NAME)
-            existing_size = collection_info.config.params.vectors.size
-            if existing_size != vector_size:
-                print(f"Warning: Existing collection has vector size {existing_size}, but model produces {vector_size}")
-                print(f"Deleting existing collection and recreating with correct size...")
-                client.delete_collection(COLLECTION_NAME)
-                client.create_collection(
-                    collection_name=COLLECTION_NAME,
-                    vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
-                )
+            
+            client.delete_collection(COLLECTION_NAME)
+            client.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            )
         except Exception as e:
             print(f"Error checking collection: {e}")
 
@@ -262,7 +258,7 @@ class MergedRAGWorker:
                 payload = {
                     "filename": filename,
                     "chunk_id": chunk_id,
-                    "text": chunk_text[:500] + "..." if len(chunk_text) > 500 else chunk_text,  # Truncate for storage
+                    "text": chunk_text[:500] + "....." if len(chunk_text) > 500 else chunk_text,  # Truncate for storage
                     "chunk_size": len(chunk_text.encode("utf-8")),
                     "worker_id": self.worker_id,
                     "text_length": len(chunk_text)
@@ -331,7 +327,7 @@ class MergedRAGWorker:
                 points.append(
                     PointStruct(
                         id=self.point_id_counter,
-                        vector=embedding,
+                        vector=embedding, ### check this
                         payload=payload,
                     )
                 )
