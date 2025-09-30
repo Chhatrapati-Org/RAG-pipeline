@@ -148,12 +148,9 @@ def initialize_collection_if_needed(vector_size: int):
 
 def preprocess_text(text: str, type: str) -> str:
     """Basic text preprocessing to clean and normalize."""
-    text = re.sub(r"\[|\]|\{|\}|\\n|\\", " ", text) # remove garbage json symbols 
+    text = re.sub(r"\\n|\\", " ", text) # remove escaped newlines and backslashes
     text = re.sub(r"\.\.+", "", text) # remove multiple dots
-    # text = re.sub(r"(?<=\bhttps?://[^\s]+)(/[^\s]+)+", "", text) # remove sub domains r"\bhttps?://[^\s]+\b" "(/[^\s]+)+"
     text = re.sub(r"<[^>]+>", "", text) # remove HTML tags
-    text = re.sub(r":\s*(null|NULL|Null|None|NONE|none),?", " is empty,", text)  # remove key with null values
-    text = re.sub(r": ", " is ", text) # humanize key-value pairs
     text = re.sub(r"\s+", " ", text)  # Collapse whitespace
     text = text.strip()
     return text
@@ -229,11 +226,11 @@ class MergedRAGWorker:
 
     def _read_json_file_chunks(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
         """
-        Read a JSON file and yield humanized chunks by recursively finding highest-level nodes under 1KB.
+        Read a JSON file and yield JSON chunks by recursively finding highest-level nodes under 1KB.
 
         Yields:
             Generator[Tuple[str, str, int], None, None]: A generator that yields
-            tuples of (humanized_text, filename, chunk_id).
+            tuples of (json_text, filename, chunk_id).
         """
         filename = os.path.basename(file_path)
         chunk_id = 0
@@ -266,14 +263,14 @@ class MergedRAGWorker:
             current_path: Current path in the JSON structure (for context)
         
         Yields:
-            str: Humanized text chunks
+            str: JSON text chunks
         """
         if isinstance(data, dict):
             for key, value in data.items():
                 new_path = f"{current_path}.{key}" if current_path else key
                 
                 # Try to create a chunk with this key-value pair
-                chunk_candidate = self._humanize_json_object({key: value}, new_path)
+                chunk_candidate = json.dumps({key: value}, indent=2, ensure_ascii=False)
                 chunk_size = len(chunk_candidate.encode('utf-8'))
                 
                 if chunk_size <= max_size:
@@ -283,11 +280,11 @@ class MergedRAGWorker:
                     # This key-value pair is too large, recurse into the value
                     if isinstance(value, (dict, list)):
                         # Add context about what we're entering
-                        context = f"In {new_path}: "
+                        context = f"{new_path}: "
                         yield from self._extract_json_chunks(value, max_size - len(context.encode('utf-8')), new_path)
                     else:
                         # It's a primitive value that's too large, split it
-                        large_text = self._humanize_primitive_value(key, value, new_path)
+                        large_text = f"{key}: {str(value)}"
                         yield from self._split_large_text(large_text, max_size)
         
         elif isinstance(data, list):
@@ -295,7 +292,7 @@ class MergedRAGWorker:
                 new_path = f"{current_path}[{i}]" if current_path else f"item_{i}"
                 
                 # Try to create a chunk with this array item
-                chunk_candidate = self._humanize_json_array_item(item, new_path, i)
+                chunk_candidate = json.dumps(item, indent=2, ensure_ascii=False)
                 chunk_size = len(chunk_candidate.encode('utf-8'))
                 
                 if chunk_size <= max_size:
@@ -307,165 +304,13 @@ class MergedRAGWorker:
         
         else:
             # It's a primitive value
-            text = self._humanize_primitive_value("value", data, current_path)
+            text = str(data)
             if len(text.encode('utf-8')) <= max_size:
                 yield text
             else:
                 yield from self._split_large_text(text, max_size)
 
-    def _humanize_json_object(self, obj: dict, path: str) -> str:
-        """
-        Convert a JSON object to human-readable text.
-        
-        Args:
-            obj: Dictionary to humanize
-            path: Path context for the object
-            
-        Returns:
-            str: Human-readable text
-        """
-        if not obj:
-            return f"The {path} section is empty."
-        
-        human_text = []
-        
-        for key, value in obj.items():
-            # Humanize the key
-            human_key = key.replace('_', ' ').replace('-', ' ').title()
-            
-            if isinstance(value, dict):
-                if not value:
-                    human_text.append(f"{human_key} is empty.")
-                else:
-                    nested_items = []
-                    for nested_key, nested_value in value.items():
-                        nested_human_key = nested_key.replace('_', ' ').replace('-', ' ')
-                        if isinstance(nested_value, (str, int, float, bool)):
-                            if isinstance(nested_value, (str)):
-                                nested_items.append(f"{nested_human_key} is {preprocess_text(nested_value)}")
-                            else:
-                                nested_items.append(f"{nested_human_key} is {nested_value}")
-                        elif isinstance(nested_value, list):
-                            if nested_value:
-                                nested_items.append(f"{nested_human_key} includes {len(nested_value)} items")
-                            else:
-                                nested_items.append(f"{nested_human_key} is empty")
-                        else:
-                            nested_items.append(f"{nested_human_key} contains additional details")
-                    
-                    human_text.append(f"{human_key} contains: {', '.join(nested_items)}.")
-            
-            elif isinstance(value, list):
-                if not value:
-                    human_text.append(f"{human_key} is an empty list.")
-                else:
-                    if len(value) == 1:
-                        item_desc = self._describe_list_item(value[0])
-                        human_text.append(f"{human_key} contains one item: {item_desc}.")
-                    else:
-                        item_types = set()
-                        for item in value[:3]:  # Sample first 3 items
-                            item_types.add(self._get_item_type_description(item))
-                        
-                        type_desc = ", ".join(item_types)
-                        human_text.append(f"{human_key} contains {len(value)} items including {type_desc}.")
-            
-            elif isinstance(value, (str, int, float)):
-                if isinstance(value, str):
-                    human_text.append(f"{human_key} is {preprocess_text(value)}")
-                else:
-                    human_text.append(f"{human_key} is {value}.")
-            
-            elif isinstance(value, bool):
-                human_text.append(f"{human_key} is {'yes' if value else 'no'}.")
-            
-            elif value is None:
-                human_text.append(f"{human_key} is not specified.")
-            
-            else:
-                human_text.append(f"{human_key} contains {type(value).__name__} data.")
-        
-        return " ".join(human_text)
 
-    def _humanize_json_array_item(self, item: Any, path: str, index: int) -> str:
-        """
-        Humanize a single array item.
-        
-        Args:
-            item: The array item
-            path: Path context
-            index: Index in the array
-            
-        Returns:
-            str: Human-readable description
-        """
-        if isinstance(item, dict):
-            return f"Item {index + 1}: {self._humanize_json_object(item, f'{path}[{index}]')}"
-        elif isinstance(item, list):
-            return f"Item {index + 1} is a list containing {len(item)} elements."
-        elif isinstance(item, str):
-            if len(item) > 100:
-                return f"Item {index + 1} is a text entry: {item}..."
-            else:
-                return f"Item {index + 1} is: {item}"
-        elif isinstance(item, (int, float)):
-            return f"Item {index + 1} has value: {item}"
-        elif isinstance(item, bool):
-            return f"Item {index + 1} is {'true' if item else 'false'}"
-        elif item is None:
-            return f"Item {index + 1} is empty"
-        else:
-            return f"Item {index + 1} contains {type(item).__name__} data"
-
-    def _describe_list_item(self, item: Any) -> str:
-        """Describe a single list item briefly."""
-        if isinstance(item, dict):
-            keys = list(item.keys())[:3]
-            key_desc = ", ".join(keys)
-            return f"an object with keys like {key_desc}"
-        elif isinstance(item, list):
-            return f"a nested list with {len(item)} items"
-        elif isinstance(item, str):
-            return f"text: {item}"
-        elif isinstance(item, (int, float)):
-            return f"number: {item}"
-        elif isinstance(item, bool):
-            return f"boolean: {item}"
-        else:
-            return f"{type(item).__name__} data"
-
-    def _get_item_type_description(self, item: Any) -> str:
-        """Get a brief type description for an item."""
-        if isinstance(item, dict):
-            return "objects"
-        elif isinstance(item, list):
-            return "lists"
-        elif isinstance(item, str):
-            return "text entries"
-        elif isinstance(item, (int, float)):
-            return "numbers"
-        elif isinstance(item, bool):
-            return "boolean values"
-        else:
-            return f"{type(item).__name__} items"
-
-    def _humanize_primitive_value(self, key: str, value: Any, path: str) -> str:
-        """Humanize a primitive value with context."""
-        human_key = key.replace('_', ' ').replace('-', ' ').title()
-        
-        if isinstance(value, str):
-            if len(value) > 200:
-                return f"{human_key} in {path} is a detailed text: {value}"
-            else:
-                return f"{human_key} in {path} is: {value}"
-        elif isinstance(value, (int, float)):
-            return f"{human_key} in {path} has value: {value}"
-        elif isinstance(value, bool):
-            return f"{human_key} in {path} is {'yes' if value else 'no'}"
-        elif value is None:
-            return f"{human_key} in {path} is not specified"
-        else:
-            return f"{human_key} in {path} contains {type(value).__name__} data"
 
     def _split_large_text(self, text: str, max_size: int) -> Generator[str, None, None]:
         """Split large text into chunks that fit within max_size."""
