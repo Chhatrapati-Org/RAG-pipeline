@@ -129,14 +129,17 @@ def initialize_collection_if_needed(vector_size: int):
             vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
         )
     else:
-        # Deleting existing collection and creating new
         try:
-            
-            client.delete_collection(COLLECTION_NAME)
-            client.create_collection(
-                collection_name=COLLECTION_NAME,
-                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
-            )
+            collection_info = client.get_collection(COLLECTION_NAME)
+            existing_size = collection_info.config.params.vectors.size
+            if existing_size != vector_size:
+                print(f"Warning: Existing collection has vector size {existing_size}, but model produces {vector_size}")
+                print(f"Deleting existing collection and recreating with correct size...")
+                client.delete_collection(COLLECTION_NAME)
+                client.create_collection(
+                    collection_name=COLLECTION_NAME,
+                    vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+                )
         except Exception as e:
             print(f"Error checking collection: {e}")
 
