@@ -13,8 +13,8 @@ from tqdm import tqdm
 from rag.qdrant import client
 
 now = datetime.datetime.now()
-formatted_now = now.strftime("%d-%m-%Y %H")
-COLLECTION_NAME = "ps04-"+formatted_now
+formatted_now = now.strftime("%d-%m-%Y_%H-%M")
+COLLECTION_NAME = "ps04:"+formatted_now
 
 
 class SharedEmbeddingModel:

@@ -1,4 +1,4 @@
-/retrieval_results.json
+retrieval_results.json
 .venv/*
 *.egg*
 *__pycache__*
