@@ -2,6 +2,7 @@ import os
 import re
 import torch
 import datetime
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple, Dict, Any, Optional, Generator
 from threading import Lock
@@ -13,8 +14,8 @@ from tqdm import tqdm
 from rag.qdrant import client
 
 now = datetime.datetime.now()
-formatted_now = now.strftime("%d-%m-%Y_%H-%M")
-COLLECTION_NAME = "ps04:"+formatted_now
+formatted_now = now.strftime("%d-%m-%Y %H %M")
+COLLECTION_NAME = "ps04_"+formatted_now
 
 
 class SharedEmbeddingModel:
@@ -145,7 +146,7 @@ def initialize_collection_if_needed(vector_size: int):
 
 
 
-def preprocess_text(text: str) -> str:
+def preprocess_text(text: str, type: str) -> str:
     """Basic text preprocessing to clean and normalize."""
     text = re.sub(r"\[|\]|\{|\}|\\n|\\", " ", text) # remove garbage json symbols 
     text = re.sub(r"\.\.+", "", text) # remove multiple dots
@@ -172,15 +173,24 @@ class MergedRAGWorker:
         return self.shared_model.get_model()
     
     
-    def _read_file_chunks(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
+    def _read_txt_file_chunks(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
         """
         Read a file and yield chunks of text, splitting on word boundaries.
+        Automatically detects JSON files and uses specialized processing.
 
         Yields:
             Generator[Tuple[str, str, int], None, None]: A generator that yields
             tuples of (chunk_text, filename, chunk_id).
         """
         filename = os.path.basename(file_path)
+        _, ext = os.path.splitext(filename)
+        
+        # Use specialized JSON processing for JSON files
+        if ext.lower() == '.json':
+            yield from self._read_json_file_chunks(file_path)
+            return
+        
+        # Default text processing for other files
         chunk_id = 0
 
         try:
@@ -216,6 +226,277 @@ class MergedRAGWorker:
 
         except Exception as e:
             print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
+
+    def _read_json_file_chunks(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
+        """
+        Read a JSON file and yield humanized chunks by recursively finding highest-level nodes under 1KB.
+
+        Yields:
+            Generator[Tuple[str, str, int], None, None]: A generator that yields
+            tuples of (humanized_text, filename, chunk_id).
+        """
+        filename = os.path.basename(file_path)
+        chunk_id = 0
+        max_chunk_size = self.chunk_size_bytes  # 1KB limit for JSON chunks
+
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                json_data = json.load(f)
+            
+            # Process the JSON data recursively to find optimal chunks
+            for chunk_text in self._extract_json_chunks(json_data, max_chunk_size):
+                if chunk_text.strip():  # Only yield non-empty chunks
+                    yield (chunk_text, filename, chunk_id)
+                    chunk_id += 1
+                    
+        except json.JSONDecodeError as e:
+            print(f"Worker {self.worker_id}: Invalid JSON in {filename}: {e}")
+            # Fallback to treating as regular text file
+            yield from self._read_txt_file_chunks(file_path)
+        except Exception as e:
+            print(f"Worker {self.worker_id}: Error reading JSON {filename}: {e}")
+
+    def _extract_json_chunks(self, data: Any, max_size: int, current_path: str = "") -> Generator[str, None, None]:
+        """
+        Recursively extract chunks from JSON data, finding the highest level nodes under max_size.
+        
+        Args:
+            data: The JSON data (dict, list, or primitive)
+            max_size: Maximum size in bytes for each chunk
+            current_path: Current path in the JSON structure (for context)
+        
+        Yields:
+            str: Humanized text chunks
+        """
+        if isinstance(data, dict):
+            for key, value in data.items():
+                new_path = f"{current_path}.{key}" if current_path else key
+                
+                # Try to create a chunk with this key-value pair
+                chunk_candidate = self._humanize_json_object({key: value}, new_path)
+                chunk_size = len(chunk_candidate.encode('utf-8'))
+                
+                if chunk_size <= max_size:
+                    # This entire key-value pair fits in one chunk
+                    yield chunk_candidate
+                else:
+                    # This key-value pair is too large, recurse into the value
+                    if isinstance(value, (dict, list)):
+                        # Add context about what we're entering
+                        context = f"In {new_path}: "
+                        yield from self._extract_json_chunks(value, max_size - len(context.encode('utf-8')), new_path)
+                    else:
+                        # It's a primitive value that's too large, split it
+                        large_text = self._humanize_primitive_value(key, value, new_path)
+                        yield from self._split_large_text(large_text, max_size)
+        
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                new_path = f"{current_path}[{i}]" if current_path else f"item_{i}"
+                
+                # Try to create a chunk with this array item
+                chunk_candidate = self._humanize_json_array_item(item, new_path, i)
+                chunk_size = len(chunk_candidate.encode('utf-8'))
+                
+                if chunk_size <= max_size:
+                    # This entire array item fits in one chunk
+                    yield chunk_candidate
+                else:
+                    # This array item is too large, recurse into it
+                    yield from self._extract_json_chunks(item, max_size, new_path)
+        
+        else:
+            # It's a primitive value
+            text = self._humanize_primitive_value("value", data, current_path)
+            if len(text.encode('utf-8')) <= max_size:
+                yield text
+            else:
+                yield from self._split_large_text(text, max_size)
+
+    def _humanize_json_object(self, obj: dict, path: str) -> str:
+        """
+        Convert a JSON object to human-readable text.
+        
+        Args:
+            obj: Dictionary to humanize
+            path: Path context for the object
+            
+        Returns:
+            str: Human-readable text
+        """
+        if not obj:
+            return f"The {path} section is empty."
+        
+        human_text = []
+        
+        for key, value in obj.items():
+            # Humanize the key
+            human_key = key.replace('_', ' ').replace('-', ' ').title()
+            
+            if isinstance(value, dict):
+                if not value:
+                    human_text.append(f"{human_key} is empty.")
+                else:
+                    nested_items = []
+                    for nested_key, nested_value in value.items():
+                        nested_human_key = nested_key.replace('_', ' ').replace('-', ' ')
+                        if isinstance(nested_value, (str, int, float, bool)):
+                            if isinstance(nested_value, (str)):
+                                nested_items.append(f"{nested_human_key} is {preprocess_text(nested_value)}")
+                            else:
+                                nested_items.append(f"{nested_human_key} is {nested_value}")
+                        elif isinstance(nested_value, list):
+                            if nested_value:
+                                nested_items.append(f"{nested_human_key} includes {len(nested_value)} items")
+                            else:
+                                nested_items.append(f"{nested_human_key} is empty")
+                        else:
+                            nested_items.append(f"{nested_human_key} contains additional details")
+                    
+                    human_text.append(f"{human_key} contains: {', '.join(nested_items)}.")
+            
+            elif isinstance(value, list):
+                if not value:
+                    human_text.append(f"{human_key} is an empty list.")
+                else:
+                    if len(value) == 1:
+                        item_desc = self._describe_list_item(value[0])
+                        human_text.append(f"{human_key} contains one item: {item_desc}.")
+                    else:
+                        item_types = set()
+                        for item in value[:3]:  # Sample first 3 items
+                            item_types.add(self._get_item_type_description(item))
+                        
+                        type_desc = ", ".join(item_types)
+                        human_text.append(f"{human_key} contains {len(value)} items including {type_desc}.")
+            
+            elif isinstance(value, (str, int, float)):
+                if isinstance(value, str):
+                    human_text.append(f"{human_key} is {preprocess_text(value)}")
+                else:
+                    human_text.append(f"{human_key} is {value}.")
+            
+            elif isinstance(value, bool):
+                human_text.append(f"{human_key} is {'yes' if value else 'no'}.")
+            
+            elif value is None:
+                human_text.append(f"{human_key} is not specified.")
+            
+            else:
+                human_text.append(f"{human_key} contains {type(value).__name__} data.")
+        
+        return " ".join(human_text)
+
+    def _humanize_json_array_item(self, item: Any, path: str, index: int) -> str:
+        """
+        Humanize a single array item.
+        
+        Args:
+            item: The array item
+            path: Path context
+            index: Index in the array
+            
+        Returns:
+            str: Human-readable description
+        """
+        if isinstance(item, dict):
+            return f"Item {index + 1}: {self._humanize_json_object(item, f'{path}[{index}]')}"
+        elif isinstance(item, list):
+            return f"Item {index + 1} is a list containing {len(item)} elements."
+        elif isinstance(item, str):
+            if len(item) > 100:
+                return f"Item {index + 1} is a text entry: {item}..."
+            else:
+                return f"Item {index + 1} is: {item}"
+        elif isinstance(item, (int, float)):
+            return f"Item {index + 1} has value: {item}"
+        elif isinstance(item, bool):
+            return f"Item {index + 1} is {'true' if item else 'false'}"
+        elif item is None:
+            return f"Item {index + 1} is empty"
+        else:
+            return f"Item {index + 1} contains {type(item).__name__} data"
+
+    def _describe_list_item(self, item: Any) -> str:
+        """Describe a single list item briefly."""
+        if isinstance(item, dict):
+            keys = list(item.keys())[:3]
+            key_desc = ", ".join(keys)
+            return f"an object with keys like {key_desc}"
+        elif isinstance(item, list):
+            return f"a nested list with {len(item)} items"
+        elif isinstance(item, str):
+            return f"text: {item}"
+        elif isinstance(item, (int, float)):
+            return f"number: {item}"
+        elif isinstance(item, bool):
+            return f"boolean: {item}"
+        else:
+            return f"{type(item).__name__} data"
+
+    def _get_item_type_description(self, item: Any) -> str:
+        """Get a brief type description for an item."""
+        if isinstance(item, dict):
+            return "objects"
+        elif isinstance(item, list):
+            return "lists"
+        elif isinstance(item, str):
+            return "text entries"
+        elif isinstance(item, (int, float)):
+            return "numbers"
+        elif isinstance(item, bool):
+            return "boolean values"
+        else:
+            return f"{type(item).__name__} items"
+
+    def _humanize_primitive_value(self, key: str, value: Any, path: str) -> str:
+        """Humanize a primitive value with context."""
+        human_key = key.replace('_', ' ').replace('-', ' ').title()
+        
+        if isinstance(value, str):
+            if len(value) > 200:
+                return f"{human_key} in {path} is a detailed text: {value}"
+            else:
+                return f"{human_key} in {path} is: {value}"
+        elif isinstance(value, (int, float)):
+            return f"{human_key} in {path} has value: {value}"
+        elif isinstance(value, bool):
+            return f"{human_key} in {path} is {'yes' if value else 'no'}"
+        elif value is None:
+            return f"{human_key} in {path} is not specified"
+        else:
+            return f"{human_key} in {path} contains {type(value).__name__} data"
+
+    def _split_large_text(self, text: str, max_size: int) -> Generator[str, None, None]:
+        """Split large text into chunks that fit within max_size."""
+        text = text.strip()
+        if not text:
+            return
+        
+        while text:
+            if len(text.encode('utf-8')) <= max_size:
+                yield text
+                break
+            
+            # Find a good split point (sentence boundary, then word boundary)
+            split_point = max_size
+            temp_text = text[:split_point]
+            
+            # Try to split at sentence boundary
+            sentence_end = max(temp_text.rfind('. '), temp_text.rfind('! '), temp_text.rfind('? '))
+            if sentence_end > max_size // 2:  # Only if we're not splitting too early
+                split_point = sentence_end + 1
+            else:
+                # Split at word boundary
+                word_boundary = temp_text.rfind(' ')
+                if word_boundary > max_size // 2:
+                    split_point = word_boundary
+            
+            chunk = text[:split_point].strip()
+            if chunk:
+                yield chunk
+            
+            text = text[split_point:].strip()
 
         
     
@@ -261,7 +542,7 @@ class MergedRAGWorker:
                 payload = {
                     "filename": filename,
                     "chunk_id": chunk_id,
-                    "text": chunk_text[:500] + "....." if len(chunk_text) > 500 else chunk_text,  # Truncate for storage
+                    "text": chunk_text, 
                     "chunk_size": len(chunk_text.encode("utf-8")),
                     "worker_id": self.worker_id,
                     "text_length": len(chunk_text)
@@ -286,7 +567,7 @@ class MergedRAGWorker:
                             payload = {
                                 "filename": filename,
                                 "chunk_id": chunk_id,
-                                "text": chunk_text[:500] + "..." if len(chunk_text) > 500 else chunk_text,
+                                "text": chunk_text,
                                 "chunk_size": len(chunk_text.encode("utf-8")),
                                 "worker_id": self.worker_id,
                                 "text_length": len(chunk_text)
@@ -364,7 +645,7 @@ class MergedRAGWorker:
         for file_path in file_paths:
             try:
                 # Step 1: Read file and create chunks
-                chunks_generator = self._read_file_chunks(file_path)
+                chunks_generator = self._read_json_file_chunks(file_path)
                 chunks = list(chunks_generator)  # Convert generator to list for multiple passes
                 if not chunks:
                     continue
@@ -393,6 +674,232 @@ class MergedRAGWorker:
                 stats["errors"] += 1
         
         return stats
+
+    def process_chunk_batch(self, chunk_batch: List[Tuple[str, str, int]]) -> Dict[str, int]:
+        """
+        Process a batch of chunks through embedding and storage pipeline.
+        
+        Args:
+            chunk_batch: List of tuples (chunk_text, filename, chunk_id)
+            
+        Returns:
+            Dictionary with processing statistics
+        """
+        stats = {
+            "chunks_processed": 0,
+            "embeddings_generated": 0,
+            "embeddings_stored": 0,
+            "errors": 0
+        }
+        
+        if not chunk_batch:
+            return stats
+        
+        try:
+            print(f"Worker {self.worker_id}: Processing batch of {len(chunk_batch)} chunks")
+            
+            # Step 1: Embed chunks
+            embeddings_with_payloads = self._embed_chunks(chunk_batch)
+            if not embeddings_with_payloads:
+                stats["errors"] = len(chunk_batch)
+                return stats
+            
+            stats["embeddings_generated"] = len(embeddings_with_payloads)
+            
+            # Step 2: Store embeddings
+            stored_count = self._store_embeddings(embeddings_with_payloads)
+            stats["embeddings_stored"] = stored_count
+            
+            if stored_count > 0:
+                stats["chunks_processed"] = len(chunk_batch)
+            else:
+                stats["errors"] = len(chunk_batch)
+                
+        except Exception as e:
+            print(f"Worker {self.worker_id}: Error processing chunk batch: {e}")
+            stats["errors"] = len(chunk_batch)
+        
+        return stats
+
+    def read_all_file_chunks(self, file_paths: List[str]) -> List[Tuple[str, str, int]]:
+        """
+        Read all files and extract all chunks without processing them.
+        
+        Args:
+            file_paths: List of file paths to read
+            
+        Returns:
+            List of all chunks from all files
+        """
+        all_chunks = []
+        
+        for file_path in file_paths:
+            try:
+                # Determine file type and use appropriate reader
+                filename = os.path.basename(file_path)
+                _, ext = os.path.splitext(filename)
+                
+                if ext.lower() == '.json':
+                    chunks_generator = self._read_json_file_chunks(file_path)
+                else:
+                    chunks_generator = self._read_txt_file_chunks(file_path)
+                
+                chunks = list(chunks_generator)
+                all_chunks.extend(chunks)
+                
+                print(f"Worker {self.worker_id}: Extracted {len(chunks)} chunks from {filename}")
+                
+            except Exception as e:
+                print(f"Worker {self.worker_id}: Error reading {file_path}: {e}")
+                continue
+        
+        return all_chunks
+
+
+class ChunkBasedMultiThreadedRAGPipeline:
+    """Pipeline where chunks are distributed across threads for parallel processing."""
+    
+    def __init__(self, max_workers: int = 4, chunk_size_kb: int = 4, chunks_per_batch: int = 50):
+        self.max_workers = max_workers
+        self.chunk_size_kb = chunk_size_kb
+        self.chunks_per_batch = chunks_per_batch
+        self.lock = Lock()
+        self.total_stats = {
+            "files_processed": 0,
+            "chunks_created": 0,
+            "chunks_processed": 0,
+            "embeddings_generated": 0,
+            "embeddings_stored": 0,
+            "errors": 0
+        }
+        
+        # Initialize shared model instance
+        print("Initializing shared embedding model for chunk-based processing...")
+        self.shared_model = SharedEmbeddingModel()
+        self.shared_model.initialize_model()
+        print("Shared embedding model initialized successfully")
+    
+    def _read_all_files_to_chunks(self, directory_path: str) -> List[Tuple[str, str, int]]:
+        """Read all files in directory and extract all chunks."""
+        if not os.path.exists(directory_path):
+            raise ValueError(f"Directory {directory_path} does not exist")
+        
+        file_paths = []
+        for filename in os.listdir(directory_path):
+            file_path = os.path.join(directory_path, filename)
+            if os.path.isfile(file_path):
+                file_paths.append(file_path)
+        
+        if not file_paths:
+            print("No files found to process")
+            return []
+        
+        print(f"Reading chunks from {len(file_paths)} files...")
+        
+        # Use a single worker to read all files and extract chunks
+        worker = MergedRAGWorker(
+            worker_id=0,
+            chunk_size_kb=self.chunk_size_kb,
+            shared_model=self.shared_model
+        )
+        
+        all_chunks = worker.read_all_file_chunks(file_paths)
+        
+        self.total_stats["files_processed"] = len(file_paths)
+        self.total_stats["chunks_created"] = len(all_chunks)
+        
+        print(f"Extracted {len(all_chunks)} total chunks from {len(file_paths)} files")
+        return all_chunks
+    
+    def _create_chunk_batches(self, chunks: List[Tuple[str, str, int]]) -> List[List[Tuple[str, str, int]]]:
+        """Divide chunks into batches for threading."""
+        if not chunks:
+            return []
+        
+        batches = [
+            chunks[i:i + self.chunks_per_batch] 
+            for i in range(0, len(chunks), self.chunks_per_batch)
+        ]
+        
+        print(f"Created {len(batches)} chunk batches ({self.chunks_per_batch} chunks per batch)")
+        return batches
+    
+    def _update_stats(self, worker_stats: Dict[str, int]):
+        """Thread-safe stats update."""
+        with self.lock:
+            for key, value in worker_stats.items():
+                if key in self.total_stats:
+                    self.total_stats[key] += value
+    
+    def _process_chunk_batch_with_worker(self, batch_info: Tuple[int, List[Tuple[str, str, int]]]) -> Dict[str, int]:
+        """Process a batch of chunks with a dedicated worker."""
+        worker_id, chunk_batch = batch_info
+        worker = MergedRAGWorker(
+            worker_id=worker_id,
+            chunk_size_kb=self.chunk_size_kb,
+            shared_model=self.shared_model
+        )
+        
+        stats = worker.process_chunk_batch(chunk_batch)
+        return stats
+    
+    def process_directory(self, directory_path: str) -> Dict[str, int]:
+        """Process directory with chunk-based multithreaded pipeline."""
+        print(f"Starting chunk-based multithreaded processing of directory: {directory_path}")
+        print(f"Configuration: {self.max_workers} workers, {self.chunks_per_batch} chunks per batch, {self.chunk_size_kb}KB max chunk size")
+        
+        # Step 1: Read all files and extract chunks
+        all_chunks = self._read_all_files_to_chunks(directory_path)
+        if not all_chunks:
+            return self.total_stats
+        
+        # Step 2: Create chunk batches
+        chunk_batches = self._create_chunk_batches(all_chunks)
+        if not chunk_batches:
+            return self.total_stats
+        
+        # Step 3: Process chunk batches with thread pool
+        batch_info = [(i, batch) for i, batch in enumerate(chunk_batches)]
+        
+        print(f"Processing {len(chunk_batches)} chunk batches with {self.max_workers} workers...")
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all chunk batches for processing
+            future_to_batch = {
+                executor.submit(self._process_chunk_batch_with_worker, info): info
+                for info in batch_info
+            }
+            
+            # Process completed batches with progress tracking
+            with tqdm(total=len(chunk_batches), desc="Processing chunk batches") as pbar:
+                for future in as_completed(future_to_batch):
+                    batch_info = future_to_batch[future]
+                    try:
+                        worker_stats = future.result()
+                        self._update_stats(worker_stats)
+                        
+                        # Update progress description
+                        pbar.set_postfix({
+                            'chunks_processed': self.total_stats['chunks_processed'],
+                            'embedded': self.total_stats['embeddings_generated'],
+                            'stored': self.total_stats['embeddings_stored']
+                        })
+                        
+                    except Exception as e:
+                        print(f"Error processing chunk batch {batch_info[0]}: {e}")
+                        # Count all chunks in failed batch as errors
+                        self.total_stats["errors"] += len(batch_info[1])
+                    finally:
+                        pbar.update(1)
+        
+        # Print final statistics
+        print("\n" + "="*60)
+        print("CHUNK-BASED PROCESSING COMPLETED")
+        print("="*60)
+        for key, value in self.total_stats.items():
+            print(f"{key.replace('_', ' ').title()}: {value}")
+        
+        return self.total_stats
 
 
 class MergedMultiThreadedRAGPipeline:
@@ -512,10 +1019,10 @@ class MergedMultiThreadedRAGPipeline:
         return self.total_stats
 
 
-# Convenience function
+# Convenience functions
 def run_merged_rag_pipeline(directory_path: str, max_workers: int = 4, chunk_size_kb: int = 4, files_per_batch: int = 5) -> Dict[str, int]:
     """
-    Run the merged multithreaded RAG pipeline.
+    Run the merged multithreaded RAG pipeline (file-based processing).
     
     Args:
         directory_path: Directory containing files to process
@@ -533,3 +1040,78 @@ def run_merged_rag_pipeline(directory_path: str, max_workers: int = 4, chunk_siz
     )
     
     return pipeline.process_directory(directory_path)
+
+
+def run_chunk_based_rag_pipeline(directory_path: str, max_workers: int = 4, chunk_size_kb: int = 4, chunks_per_batch: int = 50) -> Dict[str, int]:
+    """
+    Run the chunk-based multithreaded RAG pipeline.
+    
+    This approach:
+    1. Reads all files and extracts chunks first (single-threaded)
+    2. Distributes chunks across workers for parallel embedding/storage
+    3. Better load balancing when files have varying chunk counts
+    
+    Args:
+        directory_path: Directory containing files to process
+        max_workers: Number of worker threads
+        chunk_size_kb: Maximum chunk size in KB
+        chunks_per_batch: Number of chunks each worker processes per batch
+    
+    Returns:
+        Dictionary with processing statistics
+    """
+    pipeline = ChunkBasedMultiThreadedRAGPipeline(
+        max_workers=max_workers,
+        chunk_size_kb=chunk_size_kb,
+        chunks_per_batch=chunks_per_batch
+    )
+    
+    return pipeline.process_directory(directory_path)
+
+
+def run_hybrid_rag_pipeline(directory_path: str, max_workers: int = 4, chunk_size_kb: int = 4, 
+                           files_per_batch: int = 5, chunks_per_batch: int = 50, 
+                           use_chunk_based: bool = None) -> Dict[str, int]:
+    """
+    Run RAG pipeline with automatic selection between file-based and chunk-based processing.
+    
+    Args:
+        directory_path: Directory containing files to process
+        max_workers: Number of worker threads
+        chunk_size_kb: Maximum chunk size in KB
+        files_per_batch: Number of files per batch (file-based mode)
+        chunks_per_batch: Number of chunks per batch (chunk-based mode)
+        use_chunk_based: Force chunk-based processing (None = auto-select)
+    
+    Returns:
+        Dictionary with processing statistics
+    """
+    # Auto-select processing method if not specified
+    if use_chunk_based is None:
+        # Count files to make decision
+        file_count = 0
+        if os.path.exists(directory_path):
+            for filename in os.listdir(directory_path):
+                file_path = os.path.join(directory_path, filename)
+                if os.path.isfile(file_path):
+                    file_count += 1
+        
+        # Use chunk-based for many small files, file-based for fewer large files
+        use_chunk_based = file_count > 20
+        
+        print(f"Auto-selected {'chunk-based' if use_chunk_based else 'file-based'} processing for {file_count} files")
+    
+    if use_chunk_based:
+        return run_chunk_based_rag_pipeline(
+            directory_path=directory_path,
+            max_workers=max_workers,
+            chunk_size_kb=chunk_size_kb,
+            chunks_per_batch=chunks_per_batch
+        )
+    else:
+        return run_merged_rag_pipeline(
+            directory_path=directory_path,
+            max_workers=max_workers,
+            chunk_size_kb=chunk_size_kb,
+            files_per_batch=files_per_batch
+        )
