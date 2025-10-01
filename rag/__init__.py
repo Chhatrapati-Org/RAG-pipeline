@@ -8,7 +8,7 @@ This package contains modules for:
 - Multithreaded query retrieval (retrieval.py)
 """
 
-from .merged_pipeline import run_merged_rag_pipeline, SharedEmbeddingModel
+from .pipeline import run_merged_rag_pipeline, SharedEmbeddingModel
 from .retrieval import run_multithreaded_retrieval, MultiThreadedRetriever
 
 __all__ = [

@@ -15,7 +15,7 @@ from typing import List, Dict, Any, Tuple
 from threading import Lock
 from tqdm import tqdm
 
-from rag.merged_pipeline import SharedEmbeddingModel, COLLECTION_NAME
+from rag.pipeline import SharedEmbeddingModel, COLLECTION_NAME
 from rag.qdrant import client
 
 
