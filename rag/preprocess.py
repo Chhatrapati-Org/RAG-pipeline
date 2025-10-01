@@ -11,9 +11,10 @@ def preprocess_chunk_text(text: str) -> str:
     text = re.sub(r"\\n|\\", " ", text) # remove escaped newlines and backslashes
     text = re.sub(r"<[^>]+>", "", text) # remove HTML tags
     text = re.sub(r"\s+", " ", text)  # Collapse whitespace
-    text = re.sub(r",\s*,+", r", ", text) # remove multiple commas
-    text = re.sub(r"\"\s*,\s*\"", r". ", text) # make sentence
-    text = re.sub(r"\.\s*\.+", r". ", text) # remove multiple dots
+    text = re.sub(r"\s*,\s*,+", r", ", text) # remove multiple commas
+    text = re.sub(r"\s*\"\s*,\s*\"", r". ", text) # make sentence
+    text = re.sub(r"\s*\.\s*\.+", r". ", text) # remove multiple dots
+    text = re.sub(r"\s+", " ", text)  # Collapse whitespace
     text = text.strip()
     return text
 

@@ -115,13 +115,12 @@ class MultiThreadedRetriever:
                     f"chunk_{i}_chunk_id": result.id
                 }
                 chunks.append(chunk_data)
-            
+            files = [result.payload.get("filename", "") for result in search_results]
             # Create result structure
             result_data = {
                 "query_num": query_num,
                 "query": query_text,
-                "retrieval_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "top_k": len(search_results)
+                "response": files
             }
             
             # Add chunk data to results

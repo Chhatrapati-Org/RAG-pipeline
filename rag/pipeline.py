@@ -10,6 +10,7 @@ from nltk.tokenize import  sent_tokenize
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.utils.math import cosine_similarity
+from FlagEmbedding import FlagModel
 
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from tqdm import tqdm
@@ -36,7 +37,7 @@ class SharedEmbeddingModel:
                     cls._instance = super(SharedEmbeddingModel, cls).__new__(cls)
         return cls._instance
     
-    def initialize_model(self, model_name: str = "jinaai/jina-embeddings-v2-small-en"):
+    def initialize_model(self, model_name: str = 'BAAI/bge-large-en-v1.5'):
         """Initialize the shared model with proper error handling."""
         with self._lock:
             if self._initialized and self._model is not None:
@@ -205,7 +206,7 @@ class MergedRAGWorker:
         chunk_id = 0
         # Fixed size chunking
         try:
-            yield from self._fixed_size_chunking(file_path) #switch to semantic after testing it.
+            yield from self._semantic_chunking(file_path) #switch to semantic or fixed_size after testing it.
             return
 
         except Exception as e:
@@ -252,40 +253,56 @@ class MergedRAGWorker:
         filename = os.path.basename(file_path)
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                chunks_generator = lazy_read(f)
-                chunks = list(chunks_generator)
-                chunk = "".join(chunks)
+                chunk = f.read()
+
                 chunk_id = 0
                 chunk_size = len(chunk)
                 sentences = []
-                if chunk_size > self.chunk_size_bytes:
-                    sentences = sent_tokenize(chunk)
-                    embeddings = []
-                    combined_sentences = []
-                    combined_sentences.append(sentences[0])
-                    distances = [0]
-                    for i in range(1,len(sentences)):
-                        combined_sentences.append(sentences[i-1]+sentences[i])
-                    for i in range(1,len(sentences)):
-                        embeddings = self.shared_model.embed_documents(combined_sentences)
-                        current = embeddings[i]
-                        prev = embeddings[i-1]
+                sentences = [x.strip() for x in sent_tokenize(chunk)]
+                big_sentences = []
+                for i in range(len(sentences)):
+                    if i == len(sentences)-1:
+                        big_sentences.append(sentences[i])
+                        break
+                    if len(sentences[i]) < 25:
+                        sentences[i+1] = sentences[i]+ " "+ sentences[i+1]
+                    else:
+                        big_sentences.append(sentences[i])
 
-                        similarity = cosine_similarity([prev],[current])[0][0]
-                        distances.append(1- similarity)
-                    breakpoint_distance_threshold = 0.333
-                    indices_above_thresh = [i for i,x in enumerate(distances) if x > breakpoint_distance_threshold]
-                    o=0
-                    for i in range(len(indices_above_thresh)):
-                        chunk_to_yield = ""
-                        for j in range(o,i):
-                            chunk_to_yield += sentences[j]
-                        o = i
-                        yield (chunk_to_yield, filename, chunk_id)
-                        chunk_id += 1 
+                sentences = big_sentences
+
+                embeddings = []
+                combined_sentences = []
+                combined_sentences.append(sentences[0])
+                distances = [0]
+                for i in range(1,len(sentences)):
+                    combined_sentences.append(sentences[i-1]+sentences[i])
+
+                for i in range(1,len(sentences)):
+                    embeddings = self.shared_model.embed_documents(combined_sentences)
+                    current = embeddings[i]
+                    prev = embeddings[i-1]
+
+                    similarity = cosine_similarity([prev],[current])[0][0]
+                    distances.append(1- similarity)
+                breakpoint_distance_threshold = 0.33
+                indices_above_thresh = [i for i,x in enumerate(distances) if x > breakpoint_distance_threshold]
+                if len(indices_above_thresh) == 0:
+                    yield (chunk, filename, chunk_id)
+                    return
+                o=0
+                for i in range(len(indices_above_thresh)):
+                    chunk_to_yield = " ".join(sentences[o:indices_above_thresh[i]])
+                    
+                    yield (chunk_to_yield, filename, chunk_id)
+                    o = indices_above_thresh[i]
+                    chunk_id += 1
+                if o < len(sentences):
+                    chunk_to_yield = "".join(sentences[o:len(sentences)])
+                    yield (chunk_to_yield, filename, chunk_id)
                         # closed-distances[o]...distances[i]-open o<-i
         except Exception as e:
-            print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
+            print(f"Error reading {filename}: {e}")
 
 
     def _read_json_file_chunks(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
