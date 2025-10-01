@@ -1,4 +1,5 @@
 .venv/*
-*.egg*
-*__pycache__*
-*.json
+*.egg*/*
+__pycache__/*
+rag/__pycache__/*
+json_file/*.json
