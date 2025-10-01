@@ -6,8 +6,11 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple, Dict, Any, Optional, Generator
 from threading import Lock
+from nltk.tokenize import  sent_tokenize
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.utils.math import cosine_similarity
+
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from tqdm import tqdm
 
@@ -155,6 +158,25 @@ def preprocess_text(text: str, type: str) -> str:
     text = text.strip()
     return text
 
+def lazy_read(file_handle, chunk_size_kb=4):
+    """
+    Generator that yields chunks of specified size from an open file.
+    
+    Args:
+        file_handle: Open file object in read mode
+        chunk_size_kb: Size of each chunk in KB (default: 4KB)
+    
+    Yields:
+        str: Chunks of the file content
+    """
+    chunk_size_bytes = chunk_size_kb * 1024
+    
+    while True:
+        chunk = preprocess_text(file_handle.read(chunk_size_bytes))
+        if not chunk:
+            break
+        yield chunk
+
 class MergedRAGWorker:
     """A single worker that handles the complete pipeline for a batch of files using shared model."""
     
@@ -189,7 +211,16 @@ class MergedRAGWorker:
         
         # Default text processing for other files
         chunk_id = 0
+        # Fixed size chunking
+        try:
+            yield from self._fixed_size_chunking(file_path) #switch to semantic after testing it.
+            return
 
+        except Exception as e:
+            print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
+
+    def _fixed_size_chunking(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
+        filename = os.path.basename(file_path)
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 leftover = ""
@@ -223,6 +254,46 @@ class MergedRAGWorker:
 
         except Exception as e:
             print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
+
+    def _semantic_chunking(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
+        filename = os.path.basename(file_path)
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                chunks_generator = lazy_read(f)
+                chunks = list(chunks_generator)
+                chunk = "".join(chunks)
+                chunk_id = 0
+                chunk_size = len(chunk)
+                sentences = []
+                if chunk_size > self.chunk_size_bytes:
+                    sentences = sent_tokenize(chunk)
+                    embeddings = []
+                    combined_sentences = []
+                    combined_sentences.append(sentences[0])
+                    distances = [0]
+                    for i in range(1,len(sentences)):
+                        combined_sentences.append(sentences[i-1]+sentences[i])
+                    for i in range(1,len(sentences)):
+                        embeddings = self.shared_model.embed_documents(combined_sentences)
+                        current = embeddings[i]
+                        prev = embeddings[i-1]
+
+                        similarity = cosine_similarity([prev],[current])[0][0]
+                        distances.append(1- similarity)
+                    breakpoint_distance_threshold = 0.333
+                    indices_above_thresh = [i for i,x in enumerate(distances) if x > breakpoint_distance_threshold]
+                    o=0
+                    for i in range(len(indices_above_thresh)):
+                        chunk_to_yield = ""
+                        for j in range(o,i):
+                            chunk_to_yield += sentences[j]
+                        o = i
+                        yield (chunk_to_yield, filename, chunk_id)
+                        chunk_id += 1 
+                        # closed-distances[o]...distances[i]-open o<-i
+        except Exception as e:
+            print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
+
 
     def _read_json_file_chunks(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
         """
