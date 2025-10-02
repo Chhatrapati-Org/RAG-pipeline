@@ -3,4 +3,4 @@
 __pycache__/*
 rag/__pycache__/*
 json_file/*.json
-*.json
+retrieval_results.json

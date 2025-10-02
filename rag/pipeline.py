@@ -185,7 +185,7 @@ class MergedRAGWorker:
     def _fixed_size_chunking(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
         filename = os.path.basename(file_path)
         num_sent = 5
-        overlap = 1
+        overlap = 2
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 chunk_id = 0
