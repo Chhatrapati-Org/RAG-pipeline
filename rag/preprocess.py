@@ -4,7 +4,7 @@ import re
 
 def preprocess_chunk_text(text: str) -> str:
     """Basic text preprocessing before embedding."""
-    text = re.sub(r"\"\w+\"\s*:\s*null", "", text) # remove keys with None values
+    text = re.sub(r"\"\w+\"\s*:\s*(null|None)", "", text) # remove keys with None values
     text = re.sub(r"\"\S{,15}\"\s*:", "", text) # remove keys assuming keys have length <= 15
     text = re.sub(r"/url\?q=\S+|https?://\S+|www\.\S+", "", text) # remove URLs
     text = re.sub(r"\[|\]|\}|\{", " ", text) # remove brackets
@@ -14,7 +14,7 @@ def preprocess_chunk_text(text: str) -> str:
     text = re.sub(r"\s*,\s*,+", r", ", text) # remove multiple commas
     text = re.sub(r"\s*\"\s*,\s*\"", r". ", text) # make sentence
     text = re.sub(r"\s*\.\s*\.+", r". ", text) # remove multiple dots
-    text = re.sub(r"\s+", " ", text)  # Collapse whitespace
+    text = re.sub(r"\s+", " ", text)  # Collapse any remaining whitespaces
     text = text.strip()
     return text
 

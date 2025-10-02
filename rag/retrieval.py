@@ -18,7 +18,7 @@ from tqdm import tqdm
 from rag.pipeline import SharedEmbeddingModel, COLLECTION_NAME
 from rag.qdrant import client
 
-
+COLLECTION_NAME = COLLECTION_NAME  # Ensure consistent collection name usage
 
 
 class MultiThreadedRetriever:
@@ -286,5 +286,5 @@ if __name__ == "__main__":
         top_k=5,
         queries_per_batch=20
     )
-    
+    # Manaually change Collection name in retrieval.py before running
     print(f"Processing complete! Results saved with {len(results)} queries processed.")

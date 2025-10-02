@@ -19,7 +19,7 @@ for i in tqdm(data, desc="Exporting files", unit="file"):
         json.dump(i, f, ensure_ascii=False, indent=4)
 
 # Create a ZIP file of all exported JSON files
-with zipfile.ZipFile(rf"{output_dir}\Astraq_PS4.zip", 'w') as zip_ref:
+with zipfile.ZipFile(rf"{output_dir}\Astraq Cyber Defnce_PS4.zip", 'w') as zip_ref:
     for file in tqdm(os.listdir(output_dir), desc="Zipping files", unit="file"):
         if file.endswith('.json'):
             output_file = os.path.join(output_dir, file)
