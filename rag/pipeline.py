@@ -184,37 +184,34 @@ class MergedRAGWorker:
 
     def _fixed_size_chunking(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
         filename = os.path.basename(file_path)
+        num_sent = 5
+        overlap = 1
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                leftover = ""
                 chunk_id = 0
-                while True:
-                    # Read a new chunk from the file
-                    chunk = f.read(self.chunk_size_bytes)
-                    
-                    # If the file is exhausted, yield any remaining text and stop
-                    if not chunk:
-                        if leftover:
-                            yield (leftover, filename, chunk_id)
-                        break
+                for chunk in lazy_read(f, chunk_size_kb=self.chunk_size_bytes//1024):
+                    sentences = []
+                    for sentence in sent_tokenize(chunk):
+                        sentences.append(sentence.strip())
+                    big_sentences = []
+                    for i in range(len(sentences)):
+                        if i == len(sentences)-1:
+                            big_sentences.append(sentences[i])
+                            break
+                        if len(sentences[i]) < 25:
+                            sentences[i+1] = sentences[i]+ " "+ sentences[i+1]
+                        else:
+                            big_sentences.append(sentences[i])
 
-                    # Combine the leftover from the previous iteration with the new chunk
-                    data = leftover + chunk
-                    
-                    # Find the last space to safely split the text
-                    split_point = data.rfind(' ')
-
-                    # If a space is found, we can split
-                    if split_point != -1:
-                        chunk_to_yield = data[:split_point]
-                        leftover = data[split_point:].lstrip() # Keep the rest for the next iteration
-                        
+                    sentences = big_sentences
+                    i = 0
+                    while True:
+                        chunk_to_yield = " ".join(sentences[i:i+num_sent])
                         yield (chunk_to_yield, filename, chunk_id)
                         chunk_id += 1
-                    
-                    # If no space is found (e.g., a very long word), keep it for the next chunk
-                    else:
-                        leftover = data
+                        i += num_sent - overlap
+                        if i >= len(sentences):
+                            break
 
         except Exception as e:
             print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
