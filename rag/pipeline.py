@@ -1,16 +1,16 @@
 import os
 import re
+from sqlalchemy import text
 import torch
 import datetime
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Tuple, Dict, Any, Optional, Generator
+from typing import List, Tuple, Dict, Any, Generator
 from threading import Lock
 from nltk.tokenize import  sent_tokenize
 
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.utils.math import cosine_similarity
-from FlagEmbedding import FlagModel
 
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from tqdm import tqdm
@@ -37,7 +37,7 @@ class SharedEmbeddingModel:
                     cls._instance = super(SharedEmbeddingModel, cls).__new__(cls)
         return cls._instance
     
-    def initialize_model(self, model_name: str = 'BAAI/bge-large-en-v1.5'):
+    def initialize_model(self, model_name: str = 'BAAI/bge-base-en-v1.5'):
         """Initialize the shared model with proper error handling."""
         with self._lock:
             if self._initialized and self._model is not None:
@@ -87,31 +87,8 @@ class SharedEmbeddingModel:
                 
             except Exception as e:
                 print(f"❌ Failed to initialize shared model: {e}")
-                # Try alternative model as last resort
-                try:
-                    print("Trying alternative model as fallback...")
-                    model_kwargs = {"device": "cpu"}
-                    encode_kwargs = {"normalize_embeddings": True}
-                    
-                    self._model = HuggingFaceEmbeddings(
-                        model_name="sentence-transformers/all-MiniLM-L6-v2",
-                        model_kwargs=model_kwargs,
-                        encode_kwargs=encode_kwargs,
-                    )
-                    
-                    # Test and setup collection
-                    test_embedding = self._model.embed_documents(["Test sentence"])
-                    vector_size = len(test_embedding[0])
-                    print(f"✅ Fallback model produces {vector_size}-dimensional vectors")
-                    initialize_collection_if_needed(vector_size)
-                    
-                    self._initialized = True
-                    return self._model
-                    
-                except Exception as final_error:
-                    print(f"❌ All model initialization attempts failed: {final_error}")
-                    raise RuntimeError("Cannot initialize any embedding model")
-    
+                raise RuntimeError("Cannot initialize any embedding model")
+                
     def get_model(self):
         """Get the initialized shared model."""
         if not self._initialized or self._model is None:
@@ -195,18 +172,11 @@ class MergedRAGWorker:
             tuples of (chunk_text, filename, chunk_id).
         """
         filename = os.path.basename(file_path)
-        _, ext = os.path.splitext(filename)
         
-        # Use specialized JSON processing for JSON files
-        if ext.lower() == '.json':
-            yield from self._read_json_file_chunks(file_path)
-            return
         
-        # Default text processing for other files
-        chunk_id = 0
-        # Fixed size chunking
+        # Semantic chunking
         try:
-            yield from self._semantic_chunking(file_path) #switch to semantic or fixed_size after testing it.
+            yield from self._semantic_chunking(file_path) #switch to semantic or fixed_size.
             return
 
         except Exception as e:
@@ -253,54 +223,68 @@ class MergedRAGWorker:
         filename = os.path.basename(file_path)
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                chunk = f.read()
-
                 chunk_id = 0
-                chunk_size = len(chunk)
-                sentences = []
-                sentences = [x.strip() for x in sent_tokenize(chunk)]
-                big_sentences = []
-                for i in range(len(sentences)):
-                    if i == len(sentences)-1:
-                        big_sentences.append(sentences[i])
-                        break
-                    if len(sentences[i]) < 25:
-                        sentences[i+1] = sentences[i]+ " "+ sentences[i+1]
-                    else:
-                        big_sentences.append(sentences[i])
+                for chunk in lazy_read(f, chunk_size_kb=self.chunk_size_bytes//1024):
+                    sentences = []
+                    sentences = [x.strip() for x in sent_tokenize(chunk)]
+                    big_sentences = []
+                    for i in range(len(sentences)):
+                        if i == len(sentences)-1:
+                            big_sentences.append(sentences[i])
+                            break
+                        if len(sentences[i]) < 25:
+                            sentences[i+1] = sentences[i]+ " "+ sentences[i+1]
+                        else:
+                            big_sentences.append(sentences[i])
 
-                sentences = big_sentences
+                    sentences = big_sentences
 
-                embeddings = []
-                combined_sentences = []
-                combined_sentences.append(sentences[0])
-                distances = [0]
-                for i in range(1,len(sentences)):
-                    combined_sentences.append(sentences[i-1]+sentences[i])
+                    embeddings = []
+                    combined_sentences = []
+                    combined_sentences.append(sentences[0])
+                    distances = [0]
+                    for i in range(1,len(sentences)):
+                        combined_sentences.append(sentences[i-1]+sentences[i])
 
-                for i in range(1,len(sentences)):
-                    embeddings = self.shared_model.embed_documents(combined_sentences)
-                    current = embeddings[i]
-                    prev = embeddings[i-1]
+                    for i in range(1,len(sentences)):
+                        embeddings = self.shared_model.embed_documents(combined_sentences)
+                        current = embeddings[i]
+                        prev = embeddings[i-1]
 
-                    similarity = cosine_similarity([prev],[current])[0][0]
-                    distances.append(1- similarity)
-                breakpoint_distance_threshold = 0.33
-                indices_above_thresh = [i for i,x in enumerate(distances) if x > breakpoint_distance_threshold]
-                if len(indices_above_thresh) == 0:
-                    yield (chunk, filename, chunk_id)
-                    return
-                o=0
-                for i in range(len(indices_above_thresh)):
-                    chunk_to_yield = " ".join(sentences[o:indices_above_thresh[i]])
-                    
-                    yield (chunk_to_yield, filename, chunk_id)
-                    o = indices_above_thresh[i]
-                    chunk_id += 1
-                if o < len(sentences):
-                    chunk_to_yield = "".join(sentences[o:len(sentences)])
-                    yield (chunk_to_yield, filename, chunk_id)
-                        # closed-distances[o]...distances[i]-open o<-i
+                        similarity = cosine_similarity([prev],[current])[0][0]
+                        distances.append(1- similarity)
+                    breakpoint_distance_threshold = 0.33
+                    indices_above_thresh = [i for i,x in enumerate(distances) if x > breakpoint_distance_threshold]
+                    if len(indices_above_thresh) == 0:
+                        if len(chunk.encode('utf-8')) <= self.chunk_size_bytes:
+                            yield (chunk, filename, chunk_id)
+                        else:
+                            for chunk in self._split_large_text(chunk, self.chunk_size_bytes):
+                                yield (chunk, filename, chunk_id)
+                                chunk_id += 1
+                        continue
+                    o=0
+                    for i in range(len(indices_above_thresh)):
+                        chunk_to_yield = " ".join(sentences[o:indices_above_thresh[i]])
+                        if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
+                            yield (chunk_to_yield, filename, chunk_id)
+                            chunk_id += 1
+                        else:
+                            for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
+                                yield (chunk, filename, chunk_id)
+                                chunk_id += 1
+
+                        o = indices_above_thresh[i]
+                        
+                    if o < len(sentences):
+                        chunk_to_yield = " ".join(sentences[o:len(sentences)])
+                        if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
+                            yield (chunk_to_yield, filename, chunk_id)
+                        else:
+                            for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
+                                yield (chunk, filename, chunk_id)
+                                chunk_id += 1
+                            # closed-distances[o]...distances[i]-open o<-i
         except Exception as e:
             print(f"Error reading {filename}: {e}")
 
@@ -470,10 +454,11 @@ class MergedRAGWorker:
                     "chunk_id": chunk_id,
                     "text": chunk_text, 
                     "chunk_size": len(chunk_text.encode("utf-8")),
-                    "worker_id": self.worker_id,
-                    "text_length": len(chunk_text)
+                    "worker_id": self.worker_id
                 }
                 results.append((embeddings[i], payload))
+                if filename == "collection_1.tsv":
+                    print(f"Worker {self.worker_id}: Sample payload for chunk {chunk_id} of {filename}: {chunk_text}")
             
             print(f"Worker {self.worker_id}: Successfully embedded {len(results)} chunks")
             return results
@@ -481,34 +466,6 @@ class MergedRAGWorker:
         except Exception as e:
             print(f"Worker {self.worker_id}: Error embedding chunks: {e}")
             print(f"Worker {self.worker_id}: Error type: {type(e).__name__}")
-            
-            # Try fallback approach - embed one at a time
-            print(f"Worker {self.worker_id}: Attempting fallback individual embedding...")
-            try:
-                results = []
-                for chunk_text, filename, chunk_id in chunks:
-                    try:
-                        embedding = self.shared_model.embed_documents([chunk_text])
-                        if embedding and len(embedding) > 0:
-                            payload = {
-                                "filename": filename,
-                                "chunk_id": chunk_id,
-                                "text": chunk_text,
-                                "chunk_size": len(chunk_text.encode("utf-8")),
-                                "worker_id": self.worker_id,
-                                "text_length": len(chunk_text)
-                            }
-                            results.append((embedding[0], payload))
-                    except Exception as single_error:
-                        print(f"Worker {self.worker_id}: Failed to embed individual chunk from {filename}: {single_error}")
-                        continue
-                
-                if results:
-                    print(f"Worker {self.worker_id}: Fallback embedding succeeded for {len(results)} chunks")
-                    return results
-                    
-            except Exception as fallback_error:
-                print(f"Worker {self.worker_id}: Fallback embedding also failed: {fallback_error}")
             
             return []
     
@@ -574,10 +531,10 @@ class MergedRAGWorker:
                 filename = os.path.basename(file_path)
                 _, ext = os.path.splitext(filename)
                 
-                if ext.lower() == '.json':
-                    chunks_generator = self._read_json_file_chunks(file_path)
-                else:
-                    chunks_generator = self._read_txt_file_chunks(file_path)
+                # if ext.lower() == '.json':
+                #     chunks_generator = self._read_json_file_chunks(file_path)
+                # else:
+                chunks_generator = self._read_txt_file_chunks(file_path)
                 chunks = list(chunks_generator)  # Convert generator to list for multiple passes
                 if not chunks:
                     continue
@@ -833,7 +790,7 @@ class ChunkBasedMultiThreadedRAGPipeline:
         
         return self.total_stats
 
-
+# Main pipeline with merged reading, chunking, embedding, and storage
 class MergedMultiThreadedRAGPipeline:
     """Merged pipeline where each thread processes files through the complete pipeline."""
     
@@ -999,51 +956,3 @@ def run_chunk_based_rag_pipeline(directory_path: str, max_workers: int = 4, chun
     )
     
     return pipeline.process_directory(directory_path)
-
-
-def run_hybrid_rag_pipeline(directory_path: str, max_workers: int = 4, chunk_size_kb: int = 4, 
-                           files_per_batch: int = 5, chunks_per_batch: int = 50, 
-                           use_chunk_based: bool = None) -> Dict[str, int]:
-    """
-    Run RAG pipeline with automatic selection between file-based and chunk-based processing.
-    
-    Args:
-        directory_path: Directory containing files to process
-        max_workers: Number of worker threads
-        chunk_size_kb: Maximum chunk size in KB
-        files_per_batch: Number of files per batch (file-based mode)
-        chunks_per_batch: Number of chunks per batch (chunk-based mode)
-        use_chunk_based: Force chunk-based processing (None = auto-select)
-    
-    Returns:
-        Dictionary with processing statistics
-    """
-    # Auto-select processing method if not specified
-    if use_chunk_based is None:
-        # Count files to make decision
-        file_count = 0
-        if os.path.exists(directory_path):
-            for filename in os.listdir(directory_path):
-                file_path = os.path.join(directory_path, filename)
-                if os.path.isfile(file_path):
-                    file_count += 1
-        
-        # Use chunk-based for many small files, file-based for fewer large files
-        use_chunk_based = file_count > 20
-        
-        print(f"Auto-selected {'chunk-based' if use_chunk_based else 'file-based'} processing for {file_count} files")
-    
-    if use_chunk_based:
-        return run_chunk_based_rag_pipeline(
-            directory_path=directory_path,
-            max_workers=max_workers,
-            chunk_size_kb=chunk_size_kb,
-            chunks_per_batch=chunks_per_batch
-        )
-    else:
-        return run_merged_rag_pipeline(
-            directory_path=directory_path,
-            max_workers=max_workers,
-            chunk_size_kb=chunk_size_kb,
-            files_per_batch=files_per_batch
-        )
