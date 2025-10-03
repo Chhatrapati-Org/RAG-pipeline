@@ -53,7 +53,7 @@ class TreeNode:
         Prints the tree structure starting from the current node.
         """
         prefix = ' ' * self.get_level() * 3 + '|-- ' if self.parent else ""
-        print(prefix + self.data)
+        print(prefix + str(self.start) + "\t" + str(self.end))
         if self.children:
             for child in self.children:
                 child.print_tree()
@@ -65,6 +65,7 @@ def parser(data:str):
     parent = root
     starts = []
     ends = []
+    nodes = [root]
     for index in range(eof):
         char = data[index]
         if char == '{' or char == '[':
@@ -80,22 +81,79 @@ def parser(data:str):
                 if j == 0:
                     start = 0
                     child = TreeNode(len(parent.children), start, end)
-                    parent.add_child(child)
+                    nodes.append(child)
                     break
                 start = starts.pop(j - 1)
                 child = TreeNode(len(parent.children), start, end)
-                parent.add_child(child)
+                nodes.append(child)
                 break
             if j == len(starts) - 1:
                 start = starts.pop()
                 child = TreeNode(len(parent.children), start, end)
-                parent.add_child(child)
-                parent = parent.parent
+                nodes.append(child)
                 break
     while starts:
         start = starts.pop()
         child = TreeNode(len(parent.children), start, eof)
-        parent.add_child(child)
-        parent = child
+        nodes.append(child)
 
-    return root
+    def create_garbage_nodes(nodes):
+        
+        nodes = sorted(nodes, key=lambda x: x.start)
+        for i in range(1, len(nodes)):
+            starta = nodes[i-1].start
+            startb = nodes[i].start
+            enda = nodes[i-1].end
+            endb = nodes[i].end
+            if starta < startb and enda > endb:
+                garbage_node = TreeNode(-1, starta, startb, status=0)
+                nodes.append(garbage_node)
+        nodes = sorted(nodes, key=lambda x: x.end, reverse=True)
+        for i in range(1, len(nodes)):
+            starta = nodes[i-1].start
+            startb = nodes[i].start
+            enda = nodes[i-1].end
+            endb = nodes[i].end
+            if starta < startb and enda > endb:
+                
+                garbage_node = TreeNode(-1, endb, enda, status=0)
+                nodes.append(garbage_node)
+        nodes = sorted(nodes, key=lambda x: x.start)
+        for i in range(1, len(nodes)):
+            start = nodes[i-1].end
+            end = nodes[i].start
+            if start < end:
+                if start == 6 and end == 8:
+                    print(nodes[i-1].start, nodes[i-1].end)
+                    print(nodes[i].start, nodes[i].end)
+                garbage_node = TreeNode(-1, start, end, status=0)
+                nodes.append(garbage_node)
+
+
+        return nodes
+        
+
+    nodes = create_garbage_nodes(nodes)
+
+    def create_links(nodes):
+        nodes = sorted(nodes, key=lambda x: x.start)
+        for i in range(1, len(nodes)):
+            node = nodes[i]
+            for j in range(i - 1, -1, -1):
+                parent = nodes[j]
+                if parent.start <= node.start and parent.end >= node.end:
+                    parent.add_child(node)
+                    break
+
+
+    create_links(nodes)
+    nodes = sorted(nodes, key = lambda x: x.start)
+    return nodes[0]
+
+
+# data = r" } { { } { { } } { { } } } "
+# node = parser(data)
+# print(node.start, node.end)
+# nodes[0].print_tree()
+# print(len(nodes))
+# print([[nodes[i].start,nodes[i].end] for i in range(len(nodes))])

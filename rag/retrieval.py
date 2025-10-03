@@ -123,9 +123,9 @@ class MultiThreadedRetriever:
                 "response": files
             }
             
-            # # Add chunk data to results
-            # for chunk in chunks:
-            #     result_data.update(chunk)
+            # Add chunk data to results
+            for chunk in chunks:
+                result_data.update(chunk)
             
             return result_data
             

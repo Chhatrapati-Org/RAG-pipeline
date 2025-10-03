@@ -15,6 +15,7 @@ from langchain_community.utils.math import cosine_similarity
 
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from rag.parse_json import parser
+from rag.preprocess import preprocess_chunk_text
 
 from rag.qdrant import client
 
@@ -172,8 +173,9 @@ class MergedRAGWorker:
         
         
         # TODO: Change chunking method here
+        # TODO: Remove threshold from payload in subsequent functions if not using semantic chunking or special json chunking
         try:
-            yield from self._simple_chunking(file_path) #switch to semantic or fixed_size.
+            yield from self._special_json_chunking(file_path) #switch to semantic or fixed_size.
             return
 
         except Exception as e:
@@ -196,7 +198,8 @@ class MergedRAGWorker:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 chunk_id = 0
                 # Lazily create chunks for memory and time efficiency
-                for chunk in lazy_read(f, chunk_size_kb=self.chunk_size_bytes//1024):
+                for chunk in lazy_read(f, chunk_size_kb=4):
+                    chunk = " " + preprocess_chunk_text(chunk)
                     root = parser(chunk)
                     chunklets = []
                     def chunks_in(node, chunk):
@@ -204,11 +207,17 @@ class MergedRAGWorker:
                             for child in node.children:
                                 chunks_in(child, chunk)
                         else:
-                            chunklets.append(chunk[node.start:node.end])
-                    leaf_chunks = chunks_in(root, chunk)
-                    for chunk_to_yield in leaf_chunks:
-                        yield (chunk_to_yield, filename, chunk_id)
-                        chunk_id += 1
+                            chunklets.append(chunk[node.start+1:node.end])
+                    chunks_in(root, chunk)
+                    for chunk_to_yield in chunklets:
+                        if len(chunk_to_yield.strip()) > 5:  # Yield only non-empty chunks
+                            if len(chunk_to_yield.encode('utf-8')) > 1024:
+                                yield from self._semantic_chunking_logic(chunk_to_yield, filename, chunk_id)
+                                chunk_id += 100
+                            else:
+                                yield (chunk_to_yield, filename, chunk_id, 0.0)
+                                chunk_id += 1
+                        
 
         except Exception as e:
             print(f"Worker {self.worker_id}: Error reading {filename}: {e}") 
@@ -255,71 +264,77 @@ class MergedRAGWorker:
                 chunk_id = 0
                 # Lazily create chunks for memory and time efficiency
                 for chunk in lazy_read(f, chunk_size_kb=self.chunk_size_bytes//1024):
-                    sentences = []
-                    sentences = [x.strip() for x in sent_tokenize(chunk)]
-                    big_sentences = []
-                    # Combine short sentences
-                    for i in range(len(sentences)):
-                        if i == len(sentences)-1:
-                            big_sentences.append(sentences[i])
-                            break
-                        if len(sentences[i]) < 25:
-                            sentences[i+1] = sentences[i]+ " "+ sentences[i+1]
-                        else:
-                            big_sentences.append(sentences[i])
-
-                    sentences = big_sentences
-
-                    embeddings = []
-                    combined_sentences = []
-                    combined_sentences.append(sentences[0])
-                    distances = [0]
-                    for i in range(1,len(sentences)):
-                        combined_sentences.append(sentences[i-1]+sentences[i])
-                    # We combine two sentences to get better context for similarity
-                    for i in range(1,len(sentences)):
-                        embeddings = self.shared_model.embed_documents(combined_sentences)
-                        current = embeddings[i]
-                        prev = embeddings[i-1]
-
-                        similarity = cosine_similarity([prev],[current])[0][0]
-                        distances.append(1- similarity)
-                    breakpoint_distance_threshold = 0.33 # Tuned for BGE embeddings but can be increased a bit
-                    indices_above_thresh = [i for i,x in enumerate(distances) if x > breakpoint_distance_threshold]
-                    # No breakpoints found - yield as single chunk or split if too large
-                    if len(indices_above_thresh) == 0:
-                        if len(chunk.encode('utf-8')) <= self.chunk_size_bytes:
-                            yield (chunk, filename, chunk_id)
-                        else:
-                            for chunk in self._split_large_text(chunk, self.chunk_size_bytes):
-                                yield (chunk, filename, chunk_id)
-                                chunk_id += 1
-                        continue
-                    # Creating chunks based on detected breakpoints
-                    o=0
-                    for i in range(len(indices_above_thresh)):
-                        chunk_to_yield = " ".join(sentences[o:indices_above_thresh[i]])
-                        if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
-                            yield (chunk_to_yield, filename, chunk_id)
-                            chunk_id += 1
-                        else:
-                            for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
-                                yield (chunk, filename, chunk_id)
-                                chunk_id += 1
-
-                        o = indices_above_thresh[i]
-                        
-                    if o < len(sentences):
-                        chunk_to_yield = " ".join(sentences[o:len(sentences)])
-                        if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
-                            yield (chunk_to_yield, filename, chunk_id)
-                        else:
-                            for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
-                                yield (chunk, filename, chunk_id)
-                                chunk_id += 1
-                            # closed-distances[o]...distances[i]-open then o<-i
+                    yield from self._semantic_chunking_logic(chunk, filename, chunk_id)
+                    chunk_id += 100
         except Exception as e:
             print(f"Error reading {filename}: {e}")
+
+
+    def _semantic_chunking_logic(self, chunk: str, filename: str, chunk_id: int) -> Generator[Tuple[str, str, int, int], None, None]:
+        sentences = []
+        sentences = [x.strip() for x in sent_tokenize(chunk)]
+        big_sentences = []
+        # Combine short sentences
+        for i in range(len(sentences)):
+            if i == len(sentences)-1:
+                big_sentences.append(sentences[i])
+                break
+            if len(sentences[i]) < 30:
+                sentences[i+1] = sentences[i]+ " "+ sentences[i+1]
+            else:
+                big_sentences.append(sentences[i])
+
+        sentences = big_sentences
+
+        embeddings = []
+        combined_sentences = []
+        combined_sentences.append(sentences[0])
+        distances = [0]
+        for i in range(1,len(sentences)):
+            combined_sentences.append(sentences[i-1]+sentences[i])
+        # We combine two sentences to get better context for similarity
+        for i in range(1,len(sentences)):
+            embeddings = self.shared_model.embed_documents(combined_sentences)
+            current = embeddings[i]
+            prev = embeddings[i-1]
+
+            similarity = cosine_similarity([prev],[current])[0][0]
+            distances.append(1- similarity)
+        breakpoint_distance_threshold = [0.15, 0.18, 0.20, 0.22, 0.25, 0.28, 0.30] # Tuned for BGE embeddings but can be increased a bit
+        for breakpoint in breakpoint_distance_threshold:
+            indices_above_thresh = [i for i,x in enumerate(distances) if x > breakpoint]
+            # No breakpoints found - yield as single chunk or split if too large
+            if len(indices_above_thresh) == 0:
+                if len(chunk.encode('utf-8')) <= self.chunk_size_bytes:
+                    yield (chunk, filename, chunk_id, breakpoint)
+                else:
+                    for chunk in self._split_large_text(chunk, self.chunk_size_bytes):
+                        yield (chunk, filename, chunk_id, breakpoint)
+                        chunk_id += 1
+                return
+            # Creating chunks based on detected breakpoints
+            o=0
+            for i in range(len(indices_above_thresh)):
+                chunk_to_yield = " ".join(sentences[o:indices_above_thresh[i]])
+                if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
+                    yield (chunk_to_yield, filename, chunk_id, breakpoint)
+                    chunk_id += 1
+                else:
+                    for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
+                        yield (chunk, filename, chunk_id, breakpoint)
+                        chunk_id += 1
+
+                o = indices_above_thresh[i]
+                
+            if o < len(sentences):
+                chunk_to_yield = " ".join(sentences[o:len(sentences)])
+                if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
+                    yield (chunk_to_yield, filename, chunk_id, breakpoint)
+                else:
+                    for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
+                        yield (chunk, filename, chunk_id, breakpoint)
+                        chunk_id += 1
+        
 
 
     def _read_json_file_chunks(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
@@ -455,7 +470,7 @@ class MergedRAGWorker:
             if not texts or any(not text.strip() for text in texts):
                 print(f"Worker {self.worker_id}: Warning - some texts are empty or whitespace-only")
                 # Filter out empty texts
-                valid_chunks = [(text, filename, chunk_id) for text, filename, chunk_id in chunks if text.strip()]
+                valid_chunks = [(text, filename, chunk_id, threshold) for text, filename, chunk_id, threshold in chunks if text.strip()]
                 if not valid_chunks:
                     print(f"Worker {self.worker_id}: No valid texts to embed")
                     return []
@@ -481,17 +496,17 @@ class MergedRAGWorker:
                     raise rt_error
             
             results = []
-            for i, (chunk_text, filename, chunk_id) in enumerate(chunks):
+            for i, (chunk_text, filename, chunk_id, threshold) in enumerate(chunks):
                 payload = {
                     "filename": filename,
+                    "threshold": threshold,
                     "chunk_id": chunk_id,
                     "text": chunk_text, 
                     "chunk_size": len(chunk_text.encode("utf-8")),
                     "worker_id": self.worker_id
                 }
                 results.append((embeddings[i], payload))
-                if filename == "collection_1.tsv":
-                    print(f"Worker {self.worker_id}: Sample payload for chunk {chunk_id} of {filename}: {chunk_text}")
+                # TODO: Remove threshold from payload if not using semantic chunking or special json chunking
             
             print(f"Worker {self.worker_id}: Successfully embedded {len(results)} chunks")
             return results
