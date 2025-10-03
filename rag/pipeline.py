@@ -8,12 +8,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple, Dict, Any, Generator
 from threading import Lock
 from nltk.tokenize import  sent_tokenize
+from tqdm import tqdm
 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.utils.math import cosine_similarity
 
 from qdrant_client.models import Distance, PointStruct, VectorParams
-from tqdm import tqdm
+from rag.parse_json import parser
 
 from rag.qdrant import client
 
@@ -170,13 +171,48 @@ class MergedRAGWorker:
         filename = os.path.basename(file_path)
         
         
-        # Semantic chunking
+        # TODO: Change chunking method here
         try:
-            yield from self._semantic_chunking(file_path) #switch to semantic or fixed_size.
+            yield from self._simple_chunking(file_path) #switch to semantic or fixed_size.
             return
 
         except Exception as e:
             print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
+
+    def _simple_chunking(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
+        filename = os.path.basename(file_path)
+        try:
+            chunk_id = 0
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                yield (f.read(), filename, chunk_id)
+        except Exception as e:
+            print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
+
+
+    def _special_json_chunking(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
+        """Specialized JSON chunking for mock_data."""
+        filename = os.path.basename(file_path)
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                chunk_id = 0
+                # Lazily create chunks for memory and time efficiency
+                for chunk in lazy_read(f, chunk_size_kb=self.chunk_size_bytes//1024):
+                    root = parser(chunk)
+                    chunklets = []
+                    def chunks_in(node, chunk):
+                        if node.children:
+                            for child in node.children:
+                                chunks_in(child, chunk)
+                        else:
+                            chunklets.append(chunk[node.start:node.end])
+                    leaf_chunks = chunks_in(root, chunk)
+                    for chunk_to_yield in leaf_chunks:
+                        yield (chunk_to_yield, filename, chunk_id)
+                        chunk_id += 1
+
+        except Exception as e:
+            print(f"Worker {self.worker_id}: Error reading {filename}: {e}") 
+
 
     def _fixed_size_chunking(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
         filename = os.path.basename(file_path)
