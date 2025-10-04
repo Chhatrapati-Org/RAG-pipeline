@@ -215,7 +215,7 @@ class MergedRAGWorker:
                                 yield from self._semantic_chunking_logic(chunk_to_yield, filename, chunk_id)
                                 chunk_id += 100
                             else:
-                                yield (chunk_to_yield, filename, chunk_id, 0.0)
+                                yield (chunk_to_yield, filename, chunk_id, -1)
                                 chunk_id += 1
                         
 
@@ -300,28 +300,28 @@ class MergedRAGWorker:
 
             similarity = cosine_similarity([prev],[current])[0][0]
             distances.append(1- similarity)
-        breakpoint_distance_threshold = [0.15, 0.18, 0.20, 0.22, 0.25, 0.28, 0.30] # Tuned for BGE embeddings but can be increased a bit
-        for breakpoint in breakpoint_distance_threshold:
+        breakpoint_distance_threshold = [0.20, 0.22, 0.25, 0.28, 0.30, 0.33, 0.35, 0.38, 0.40] # Tuned for BGE embeddings but can be increased a bit
+        for j, breakpoint in enumerate(breakpoint_distance_threshold):
             indices_above_thresh = [i for i,x in enumerate(distances) if x > breakpoint]
             # No breakpoints found - yield as single chunk or split if too large
             if len(indices_above_thresh) == 0:
                 if len(chunk.encode('utf-8')) <= self.chunk_size_bytes:
-                    yield (chunk, filename, chunk_id, breakpoint)
+                    yield (chunk, filename, chunk_id, j)
                 else:
                     for chunk in self._split_large_text(chunk, self.chunk_size_bytes):
-                        yield (chunk, filename, chunk_id, breakpoint)
+                        yield (chunk, filename, chunk_id, j)
                         chunk_id += 1
-                return
+                continue
             # Creating chunks based on detected breakpoints
             o=0
             for i in range(len(indices_above_thresh)):
                 chunk_to_yield = " ".join(sentences[o:indices_above_thresh[i]])
                 if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
-                    yield (chunk_to_yield, filename, chunk_id, breakpoint)
+                    yield (chunk_to_yield, filename, chunk_id, j)
                     chunk_id += 1
                 else:
                     for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
-                        yield (chunk, filename, chunk_id, breakpoint)
+                        yield (chunk, filename, chunk_id, j)
                         chunk_id += 1
 
                 o = indices_above_thresh[i]
@@ -329,10 +329,10 @@ class MergedRAGWorker:
             if o < len(sentences):
                 chunk_to_yield = " ".join(sentences[o:len(sentences)])
                 if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
-                    yield (chunk_to_yield, filename, chunk_id, breakpoint)
+                    yield (chunk_to_yield, filename, chunk_id, j)
                 else:
                     for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
-                        yield (chunk, filename, chunk_id, breakpoint)
+                        yield (chunk, filename, chunk_id, j)
                         chunk_id += 1
         
 
