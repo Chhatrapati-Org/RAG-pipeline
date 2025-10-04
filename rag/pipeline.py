@@ -308,8 +308,8 @@ class MergedRAGWorker:
                 if len(chunk.encode('utf-8')) <= self.chunk_size_bytes:
                     yield (chunk, filename, chunk_id, j)
                 else:
-                    for chunk in self._split_large_text(chunk, self.chunk_size_bytes):
-                        yield (chunk, filename, chunk_id, j)
+                    for chunk_to_yield in self._split_large_text(chunk, self.chunk_size_bytes):
+                        yield (chunk_to_yield, filename, chunk_id, j)
                         chunk_id += 1
                 continue
             # Creating chunks based on detected breakpoints
