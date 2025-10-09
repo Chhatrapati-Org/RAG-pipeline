@@ -60,17 +60,17 @@ class TreeNode:
 
 
 def parser(data:str):
-    eof = len(data)
+    eof = len(data)-1
     root = TreeNode(0,0,eof)
     parent = root
     starts = []
     ends = []
     nodes = [root]
-    for index in range(eof):
+    for index in range(eof+1):
         char = data[index]
-        if char == '{' or char == '[':
+        if char == r'{' or char == r'[':
             starts.append(index)
-        elif char == '}' or char == ']':
+        elif char == r'}' or char == r']':
             ends.append(index)
 
     while ends:
@@ -123,9 +123,6 @@ def parser(data:str):
             start = nodes[i-1].end
             end = nodes[i].start
             if start < end:
-                if start == 6 and end == 8:
-                    print(nodes[i-1].start, nodes[i-1].end)
-                    print(nodes[i].start, nodes[i].end)
                 garbage_node = TreeNode(-1, start, end, status=0)
                 nodes.append(garbage_node)
 

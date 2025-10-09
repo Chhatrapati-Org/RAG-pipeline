@@ -199,23 +199,28 @@ class MergedRAGWorker:
                 chunk_id = 0
                 # Lazily create chunks for memory and time efficiency
                 for chunk in lazy_read(f, chunk_size_kb=4):
-                    chunk = " " + preprocess_chunk_text(chunk)
+                    chunk = " " + chunk
                     root = parser(chunk)
-                    chunklets = []
+                    
                     def chunks_in(node, chunk):
                         if node.children:
+                            lst = []
                             for child in node.children:
-                                chunks_in(child, chunk)
+                                lst.extend(chunks_in(child, chunk))
+                            return lst
                         else:
-                            chunklets.append(chunk[node.start+1:node.end])
-                    chunks_in(root, chunk)
+                            part = chunk[node.start+1:node.end]
+                            return [part]
+                    chunklets = chunks_in(root, chunk)
                     for chunk_to_yield in chunklets:
-                        if len(chunk_to_yield.strip()) > 5:  # Yield only non-empty chunks
+                        chunk_to_yield = re.sub(r"[\{\}\[\]]", " ", chunk_to_yield) # remove REMAINING brackets
+                        chunk_to_yield = re.sub(r"\s+", " ", chunk_to_yield) # remove REMAINING whitespace
+                        if len(chunk_to_yield.strip()) > 20:  # Yield only non-empty chunks
                             if len(chunk_to_yield.encode('utf-8')) > 1024:
                                 yield from self._semantic_chunking_logic(chunk_to_yield, filename, chunk_id)
                                 chunk_id += 100
                             else:
-                                yield (chunk_to_yield, filename, chunk_id, -1)
+                                yield (chunk_to_yield, filename, chunk_id)
                                 chunk_id += 1
                         
 
@@ -270,7 +275,7 @@ class MergedRAGWorker:
             print(f"Error reading {filename}: {e}")
 
 
-    def _semantic_chunking_logic(self, chunk: str, filename: str, chunk_id: int) -> Generator[Tuple[str, str, int, int], None, None]:
+    def _semantic_chunking_logic(self, chunk: str, filename: str, chunk_id: int) -> Generator[Tuple[str, str, int], None, None]:
         sentences = []
         sentences = [x.strip() for x in sent_tokenize(chunk)]
         big_sentences = []
@@ -300,130 +305,40 @@ class MergedRAGWorker:
 
             similarity = cosine_similarity([prev],[current])[0][0]
             distances.append(1- similarity)
-        breakpoint_distance_threshold = [0.20, 0.22, 0.25, 0.28, 0.30, 0.33, 0.35, 0.38, 0.40] # Tuned for BGE embeddings but can be increased a bit
-        for j, breakpoint in enumerate(breakpoint_distance_threshold):
-            indices_above_thresh = [i for i,x in enumerate(distances) if x > breakpoint]
-            # No breakpoints found - yield as single chunk or split if too large
-            if len(indices_above_thresh) == 0:
-                if len(chunk.encode('utf-8')) <= self.chunk_size_bytes:
-                    yield (chunk, filename, chunk_id, j)
-                else:
-                    for chunk_to_yield in self._split_large_text(chunk, self.chunk_size_bytes):
-                        yield (chunk_to_yield, filename, chunk_id, j)
-                        chunk_id += 1
-                continue
-            # Creating chunks based on detected breakpoints
-            o=0
-            for i in range(len(indices_above_thresh)):
-                chunk_to_yield = " ".join(sentences[o:indices_above_thresh[i]])
-                if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
-                    yield (chunk_to_yield, filename, chunk_id, j)
-                    chunk_id += 1
-                else:
-                    for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
-                        yield (chunk, filename, chunk_id, j)
-                        chunk_id += 1
-
-                o = indices_above_thresh[i]
-                
-            if o < len(sentences):
-                chunk_to_yield = " ".join(sentences[o:len(sentences)])
-                if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
-                    yield (chunk_to_yield, filename, chunk_id, j)
-                else:
-                    for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
-                        yield (chunk, filename, chunk_id, j)
-                        chunk_id += 1
-        
-
-
-    def _read_json_file_chunks(self, file_path: str) -> Generator[Tuple[str, str, int], None, None]:
-        """
-        Read a JSON file and yield JSON chunks by recursively finding highest-level nodes under 1KB.
-
-        Yields:
-            Generator[Tuple[str, str, int], None, None]: A generator that yields
-            tuples of (json_text, filename, chunk_id).
-        """
-        filename = os.path.basename(file_path)
-        chunk_id = 0
-        max_chunk_size = self.chunk_size_bytes  # 1KB limit for JSON chunks
-
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                json_data = json.load(f)
-            
-            # Process the JSON data recursively to find optimal chunks
-            for chunk_text in self._extract_json_chunks(json_data, max_chunk_size):
-                if chunk_text.strip():  # Only yield non-empty chunks
-                    yield (chunk_text, filename, chunk_id)
-                    chunk_id += 1
-                    
-        except json.JSONDecodeError as e:
-            print(f"Worker {self.worker_id}: Invalid JSON in {filename}: {e}")
-            # Fallback to treating as regular text file
-            yield from self._read_txt_file_chunks(file_path)
-        except Exception as e:
-            print(f"Worker {self.worker_id}: Error reading JSON {filename}: {e}")
-
-    def _extract_json_chunks(self, data: Any, max_size: int, current_path: str = "") -> Generator[str, None, None]:
-        """
-        Recursively extract chunks from JSON data, finding the highest level nodes under max_size.
-        
-        Args:
-            data: The JSON data (dict, list, or primitive)
-            max_size: Maximum size in bytes for each chunk
-            current_path: Current path in the JSON structure (for context)
-        
-        Yields:
-            str: JSON text chunks
-        """
-        if isinstance(data, dict):
-            for key, value in data.items():
-                new_path = f"{current_path}.{key}" if current_path else key
-                
-                # Try to create a chunk with this key-value pair
-                chunk_candidate = json.dumps({key: value}, indent=2, ensure_ascii=False)
-                chunk_size = len(chunk_candidate.encode('utf-8'))
-                
-                if chunk_size <= max_size:
-                    # This entire key-value pair fits in one chunk
-                    yield chunk_candidate
-                else:
-                    # This key-value pair is too large, recurse into the value
-                    if isinstance(value, (dict, list)):
-                        # Add context about what we're entering
-                        context = f"{new_path}: "
-                        yield from self._extract_json_chunks(value, max_size - len(context.encode('utf-8')), new_path)
-                    else:
-                        # It's a primitive value that's too large, split it
-                        large_text = f"{key}: {str(value)}"
-                        yield from self._split_large_text(large_text, max_size)
-        
-        elif isinstance(data, list):
-            for i, item in enumerate(data):
-                new_path = f"{current_path}[{i}]" if current_path else f"item_{i}"
-                
-                # Try to create a chunk with this array item
-                chunk_candidate = json.dumps(item, indent=2, ensure_ascii=False)
-                chunk_size = len(chunk_candidate.encode('utf-8'))
-                
-                if chunk_size <= max_size:
-                    # This entire array item fits in one chunk
-                    yield chunk_candidate
-                else:
-                    # This array item is too large, recurse into it
-                    yield from self._extract_json_chunks(item, max_size, new_path)
-        
-        else:
-            # It's a primitive value
-            text = str(data)
-            if len(text.encode('utf-8')) <= max_size:
-                yield text
+        breakpoint_distance_threshold = 0.25 # Tuned for BGE embeddings but can be increased a bit
+        indices_above_thresh = [i for i,x in enumerate(distances) if x > breakpoint_distance_threshold]
+        # No breakpoints found - yield as single chunk or split if too large
+        if len(indices_above_thresh) == 0:
+            if len(chunk.encode('utf-8')) <= self.chunk_size_bytes:
+                yield (chunk, filename, chunk_id)
             else:
-                yield from self._split_large_text(text, max_size)
+                for chunk_to_yield in self._split_large_text(chunk, self.chunk_size_bytes):
+                    yield (chunk_to_yield, filename, chunk_id)
+                    chunk_id += 1
+            return
+        # Creating chunks based on detected breakpoints
+        o=0
+        for i in range(len(indices_above_thresh)):
+            chunk_to_yield = " ".join(sentences[o:indices_above_thresh[i]])
+            if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
+                yield (chunk_to_yield, filename, chunk_id)
+                chunk_id += 1
+            else:
+                for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
+                    yield (chunk, filename, chunk_id)
+                    chunk_id += 1
 
-
+            o = indices_above_thresh[i]
+            
+        if o < len(sentences):
+            chunk_to_yield = " ".join(sentences[o:len(sentences)])
+            if len(chunk_to_yield.encode('utf-8')) <= self.chunk_size_bytes:
+                yield (chunk_to_yield, filename, chunk_id)
+            else:
+                for chunk in self._split_large_text(chunk_to_yield, self.chunk_size_bytes):
+                    yield (chunk, filename, chunk_id)
+                    chunk_id += 1
+        
 
     def _split_large_text(self, text: str, max_size: int) -> Generator[str, None, None]:
         """Split large text into chunks that fit within max_size."""
@@ -470,7 +385,7 @@ class MergedRAGWorker:
             if not texts or any(not text.strip() for text in texts):
                 print(f"Worker {self.worker_id}: Warning - some texts are empty or whitespace-only")
                 # Filter out empty texts
-                valid_chunks = [(text, filename, chunk_id, threshold) for text, filename, chunk_id, threshold in chunks if text.strip()]
+                valid_chunks = [(text, filename, chunk_id) for text, filename, chunk_id in chunks if text.strip()]
                 if not valid_chunks:
                     print(f"Worker {self.worker_id}: No valid texts to embed")
                     return []
@@ -496,10 +411,9 @@ class MergedRAGWorker:
                     raise rt_error
             
             results = []
-            for i, (chunk_text, filename, chunk_id, threshold) in enumerate(chunks):
+            for i, (chunk_text, filename, chunk_id) in enumerate(chunks):
                 payload = {
                     "filename": filename,
-                    "threshold": threshold,
                     "chunk_id": chunk_id,
                     "text": chunk_text, 
                     "chunk_size": len(chunk_text.encode("utf-8")),
@@ -579,9 +493,6 @@ class MergedRAGWorker:
                 filename = os.path.basename(file_path)
                 _, ext = os.path.splitext(filename)
                 
-                # if ext.lower() == '.json':
-                #     chunks_generator = self._read_json_file_chunks(file_path)
-                # else:
                 chunks_generator = self._read_txt_file_chunks(file_path)
                 chunks = list(chunks_generator)  # Convert generator to list for multiple passes
                 if not chunks:
@@ -600,7 +511,7 @@ class MergedRAGWorker:
                 # Step 3: Store embeddings
                 stored_count = self._store_embeddings(embeddings_with_payloads)
                 stats["embeddings_stored"] += stored_count
-                
+                 
                 if stored_count > 0:
                     stats["files_processed"] += 1
                 else:
@@ -676,10 +587,7 @@ class MergedRAGWorker:
                 filename = os.path.basename(file_path)
                 _, ext = os.path.splitext(filename)
                 
-                if ext.lower() == '.json':
-                    chunks_generator = self._read_json_file_chunks(file_path)
-                else:
-                    chunks_generator = self._read_txt_file_chunks(file_path)
+                chunks_generator = self._read_txt_file_chunks(file_path)
                 
                 chunks = list(chunks_generator)
                 all_chunks.extend(chunks)

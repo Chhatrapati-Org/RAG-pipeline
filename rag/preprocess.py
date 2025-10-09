@@ -13,7 +13,6 @@ def preprocess_chunk_text(text: str) -> str:
     text = re.sub(r"<[^>]+>", "", text) # remove HTML tags
     text = re.sub(r"\s+", " ", text)  # Collapse whitespace
     text = re.sub(r"\s*,\s*,+", r", ", text) # remove multiple commas
-    text = re.sub(r"\s*[\{\}\[\]]\s*,\s*[\{\}\[\]]", r". ", text) # make sentence boundaries
     text = re.sub(r"\s*\.\s*\.+", r". ", text) # remove multiple dots
     text = re.sub(r"(,\.)|(\.,)", r". ", text) # remove comma and dot when together
     text = re.sub(r"\s+", " ", text)  # Collapse any remaining whitespaces

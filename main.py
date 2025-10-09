@@ -30,7 +30,7 @@ def main():
         #     chunks_per_batch=50        # Files processed per thread batch
         # )
         queries_file = r"C:\Users\22bcscs055\Downloads\Queries.json"
-        output_file = r"C:\Users\22bcscs055\Documents\ps04-rag-v2\retrieval_results3.json"
+        output_file = r"C:\Users\22bcscs055\Documents\ps04-rag-v2\retrieval_results4.json"
         
         results = run_multithreaded_retrieval(
             queries_file_path=queries_file,
