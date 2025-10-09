@@ -17,7 +17,7 @@ app = typer.Typer(help="CLI for PS04 RAG: ingest, retrieve, preprocess, and expo
 qdrant_client = QdrantClient(url="http://localhost:6333")
 
 
-@app.command("embed")
+@app.command("embed-main")
 def ingest_merged(
     directory_path: str = typer.Argument(..., help="Directory containing input files"),
     max_workers: int = typer.Option(4, help="Number of worker threads"),
@@ -114,9 +114,11 @@ def export_results(
         if query_num is None:
             continue
         item_copy = dict(item)
-        item_copy.pop("query_num", None)
+        new_item = {}
+        new_item['query'] = item_copy['query']
+        new_item['response'] = item_copy['response']
         output_file = out_dir / f"{query_num}.json"
-        _write_json(item_copy, output_file)
+        _write_json(new_item, output_file)
 
     if zip_name:
         zip_path = out_dir / zip_name

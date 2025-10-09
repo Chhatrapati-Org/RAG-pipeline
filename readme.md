@@ -1,3 +1,14 @@
-# check results
+### check results
 Query num = 54
 req answer = doc_32.txt
+Critical Query nums = 21, 29, 32, 57, 88, 7001, 7002, 7036, 7039, 7041, 7044, 7048, 7055, 7059, 7080, 7084, 7094
+
+# steps
+1. start venv
+2. start docker image of qdrant on 6333 port
+3. start ollama for evaluation
+4. download models from huggingface if needed offline
+5. run cli.py with appropriate argument and options
+
+## Installing ollama
+[text](https://github.com/ollama/ollama?tab=readme-ov-file#ollama)
