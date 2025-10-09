@@ -20,11 +20,11 @@ qdrant_client = QdrantClient(url="http://localhost:6333")
 @app.command("embed-main")
 def ingest_merged(
     directory_path: str = typer.Argument(..., help="Directory containing input files"),
-    max_workers: int = typer.Option(4, help="Number of worker threads"),
-    chunk_size_kb: int = typer.Option(4, help="Max chunk size in KB"),
-    files_per_batch: int = typer.Option(5, help="Files per worker batch"),
+    max_workers: int = typer.Option(20, help="Number of worker threads"),
+    chunk_size_kb: int = typer.Option(1, help="Max chunk size in KB"),
+    files_per_batch: int = typer.Option(20, help="Files per worker batch"),
 ):
-    stats = run_merged_rag_pipeline(
+    stats, _ = run_merged_rag_pipeline(
         qdrant_client=qdrant_client,
         directory_path=directory_path,
         max_workers=max_workers,
@@ -37,8 +37,8 @@ def ingest_merged(
 @app.command("embed-chunks")
 def ingest_chunks(
     directory_path: str = typer.Argument(..., help="Directory containing input files"),
-    max_workers: int = typer.Option(4, help="Number of worker threads"),
-    chunk_size_kb: int = typer.Option(4, help="Max chunk size in KB"),
+    max_workers: int = typer.Option(20, help="Number of worker threads"),
+    chunk_size_kb: int = typer.Option(1, help="Max chunk size in KB"),
     chunks_per_batch: int = typer.Option(50, help="Chunks per worker batch"),
 ):
     stats = run_chunk_based_rag_pipeline(
@@ -50,18 +50,20 @@ def ingest_chunks(
     )
     typer.echo(json.dumps(stats, indent=2))
 
-
+# TODO: Run DOCKER image of Qdrant if not running
 @app.command("retrieve")
 def retrieve(
     queries_file_path: str = typer.Argument(..., help="Path to queries JSON file"),
+    collection_name: str = typer.Argument(..., help="Qdrant collection name"),
     output_file_path: Optional[str] = typer.Option(
         None, "--output", "-o", help="Path to save retrieval results JSON"
     ),
-    max_workers: int = typer.Option(16, help="Number of worker threads"),
+    max_workers: int = typer.Option(20, help="Number of worker threads"),
     top_k: int = typer.Option(5, help="Top-k similar chunks per query"),
-    queries_per_batch: int = typer.Option(20, help="Queries per worker batch"),
+    queries_per_batch: int = typer.Option(50, help="Queries per worker batch"),
 ):
     results = run_multithreaded_retrieval(
+        COLLECTION_NAME=collection_name,
         qdrant_client=qdrant_client,
         queries_file_path=queries_file_path,
         output_file_path=output_file_path,
@@ -71,7 +73,34 @@ def retrieve(
     )
     typer.echo(json.dumps(results, indent=2, ensure_ascii=False))
 
+@app.command("embed-retrieve")
+def embed_retrieve():
+    directory_path = input("Enter the Directory containing input files:")
+    queries_file_path = input("Enter the Path to queries JSON file:")
+    output_file_path = input("Enter the Path to save retrieval results JSON (Do not skip):")
+    
+    stats, collection_name = run_merged_rag_pipeline(
+        qdrant_client=qdrant_client,
+        directory_path=directory_path,
+        max_workers=20,
+        chunk_size_kb=1,
+        files_per_batch=20,
+    )
+    typer.echo(json.dumps(stats, indent=2))
 
+    results = run_multithreaded_retrieval(
+        COLLECTION_NAME=collection_name,
+        qdrant_client=qdrant_client,
+        queries_file_path=queries_file_path,
+        output_file_path=output_file_path,
+        max_workers=20,
+        top_k=5,
+        queries_per_batch=20,
+    )
+    # typer.echo(json.dumps(results, indent=2, ensure_ascii=False))
+
+
+# TODO: Start the ollama server if not running
 @app.command("evaluate")
 def evaluate(
     results_file: str = typer.Argument(..., help="Path to retrieval results JSON"),

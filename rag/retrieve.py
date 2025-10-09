@@ -7,20 +7,21 @@ from typing import Any, Dict, List, Tuple
 
 from tqdm import tqdm
 
-from rag.pipeline import COLLECTION_NAME, SharedEmbeddingModel
+from rag.pipeline import SharedEmbeddingModel
 
-COLLECTION_NAME = COLLECTION_NAME
 
 
 class MultiThreadedRetriever:
     def __init__(
         self,
+        COLLECTION_NAME,
         qdrant_client,
         max_workers: int = 4,
         top_k: int = 5,
         queries_per_batch: int = 10,
     ):
         self.qdrant_client = qdrant_client
+        self.collection_name = COLLECTION_NAME
         self.max_workers = max_workers
         self.top_k = top_k
         self.queries_per_batch = queries_per_batch
@@ -35,16 +36,16 @@ class MultiThreadedRetriever:
 
     def _verify_collection(self):
         try:
-            if not self.qdrant_client.collection_exists(COLLECTION_NAME):
+            if not self.qdrant_client.collection_exists(self.collection_name):
                 raise ValueError(
-                    f"Collection '{COLLECTION_NAME}' does not exist. Please run the ingestion pipeline first."
+                    f"Collection '{self.collection_name}' does not exist. Please run the ingestion pipeline first."
                 )
 
-            collection_info = self.qdrant_client.get_collection(COLLECTION_NAME)
+            collection_info = self.qdrant_client.get_collection(self.collection_name)
             vector_size = collection_info.config.params.vectors.size
-            point_count = self.qdrant_client.count(COLLECTION_NAME).count
+            point_count = self.qdrant_client.count(self.collection_name).count
 
-            print(f"✅ Collection '{COLLECTION_NAME}' found:")
+            print(f"✅ Collection '{self.collection_name}' found:")
             print(f"   - Vector dimensions: {vector_size}")
             print(f"   - Total points: {point_count}")
 
@@ -84,7 +85,7 @@ class MultiThreadedRetriever:
 
             # Search for similar chunks in Qdrant
             search_results = self.qdrant_client.search(
-                collection_name=COLLECTION_NAME,
+                collection_name=self.collection_name,
                 query_vector=query_embedding,
                 limit=self.top_k,
                 with_payload=True,
@@ -130,13 +131,13 @@ class MultiThreadedRetriever:
         batch_id, queries = batch_info
         results = []
 
-        print(f"Worker {batch_id}: Processing {len(queries)} queries...")
+        # print(f"Worker {batch_id}: Processing {len(queries)} queries...")
 
         for query_data in queries:
             result = self._process_single_query(query_data)
             results.append(result)
 
-        print(f"Worker {batch_id}: Completed {len(results)} queries")
+        # print(f"Worker {batch_id}: Completed {len(results)} queries")
         return results
 
     def process_queries(
@@ -227,6 +228,7 @@ class MultiThreadedRetriever:
 
 
 def run_multithreaded_retrieval(
+    COLLECTION_NAME,
     qdrant_client,
     queries_file_path: str,
     output_file_path: str = None,
@@ -235,6 +237,7 @@ def run_multithreaded_retrieval(
     queries_per_batch: int = 20,
 ) -> List[Dict[str, Any]]:
     retriever = MultiThreadedRetriever(
+        COLLECTION_NAME=COLLECTION_NAME,
         qdrant_client=qdrant_client,
         max_workers=max_workers,
         top_k=top_k,

@@ -8,7 +8,7 @@ from pathlib import Path
 from rag.pipeline import run_merged_rag_pipeline
 from rag.retrieve import run_multithreaded_retrieval
 
-
+# FIXME: OUTDATED - Use cli.py instead
 def main():
     """Main function to run the merged multithreaded RAG pipeline."""
     # Directory to process - update this path as needed
@@ -16,7 +16,7 @@ def main():
     directory_path_json = r"C:\Users\22bcscs055\Documents\ps04-rag-v2\json_file"
     try:
         # Use the new merged pipeline for optimal performance
-        stats = run_merged_rag_pipeline(
+        stats, _ = run_merged_rag_pipeline(
             directory_path=directory_path_mock,
             max_workers=20,  # Adjust based on your CPU cores
             chunk_size_kb=4,  # 4KB max chunk size
@@ -30,7 +30,7 @@ def main():
         # )
         queries_file = r"C:\Users\22bcscs055\Downloads\Queries.json"
         # TODO: Update output file path as needed
-        output_file = r"C:\Users\22bcscs055\Documents\ps04-rag-v2\retrieval_results3.json"
+        output_file = r"C:\Users\22bcscs055\Documents\ps04-rag-v2\retrieval_results5.json"
         
         results = run_multithreaded_retrieval(
             queries_file_path=queries_file,

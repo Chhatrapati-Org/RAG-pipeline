@@ -139,15 +139,15 @@ class MergedRAGWorker:
         self,
         qdrant_client,
         worker_id: int,
-        chunk_size_kb: int = 4,
+        chunk_size_kb: int = 4, # FIXME: currently needs to be integer, change to float
         shared_model: SharedEmbeddingModel = None,
     ):
         self.worker_id = worker_id
-        self.chunk_size_bytes = chunk_size_kb * 1024
+        self.chunk_size_bytes = chunk_size_kb * 1000
         self.shared_model = shared_model or SharedEmbeddingModel()
         self.qdrant_client = qdrant_client
         self.point_id_counter = worker_id * 10000  # Unique ID range per worker
-        print(f"Worker {self.worker_id}: Initialized with shared model")
+        # print(f"Worker {self.worker_id}: Initialized with shared model")
 
     def get_model(self):
         return self.shared_model.get_model()
@@ -199,6 +199,7 @@ class MergedRAGWorker:
                         else:
                             part = chunk[node.start+1:node.end]
                             return [part]
+                    
                     chunklets = chunks_in(root, chunk)
                     for chunk_to_yield in chunklets:
                         chunk_to_yield = re.sub(r"[\{\}\[\]]", " ", chunk_to_yield) # remove REMAINING brackets
@@ -368,17 +369,22 @@ class MergedRAGWorker:
         try:
             texts = [chunk[0] for chunk in chunks]
 
-            if not texts or any(not text.strip() for text in texts):
-                print(f"Worker {self.worker_id}: Warning - some texts are empty or whitespace-only")
-                # Filter out empty texts
-                valid_chunks = [(text, filename, chunk_id) for text, filename, chunk_id in chunks if text.strip()]
-                if not valid_chunks:
-                    print(f"Worker {self.worker_id}: No valid texts to embed")
-                    return []
-                texts = [chunk[0] for chunk in valid_chunks]
-                chunks = valid_chunks
+            # Merge small texts
+            valid_chunks = []
+            prefix = ""
+            for i, chunk in enumerate(chunks):
+                text = prefix + chunk[0]
+                if len(text.strip()) < 75:
+                    prefix = text
+                else:
+                    valid_chunks.append((text, chunk[1], chunk[2]))
+            if not valid_chunks:
+                print(f"Worker {self.worker_id} for {chunks[0][1]}: No valid texts to embed")
+                return []
+            texts = [chunk[0] for chunk in valid_chunks]
+            chunks = valid_chunks
 
-            print(f"Worker {self.worker_id}: Embedding {len(texts)} text chunks...")
+            # print(f"Worker {self.worker_id}: Embedding {len(texts)} text chunks...")
 
             try:
                 embeddings = self.shared_model.embed_documents(texts)
@@ -409,9 +415,9 @@ class MergedRAGWorker:
                 results.append((embeddings[i], payload))
                 # TODO: Remove threshold from payload if not using semantic chunking or special json chunking
 
-            print(
-                f"Worker {self.worker_id}: Successfully embedded {len(results)} chunks"
-            )
+            # print(
+            #     f"Worker {self.worker_id}: Successfully embedded {len(results)} chunks"
+            # )
             return results
 
         except Exception as e:
@@ -460,9 +466,9 @@ class MergedRAGWorker:
                 points=points,
             )
 
-            print(
-                f"Worker {self.worker_id}: Successfully stored {len(points)} embeddings (vector size: {vector_size})"
-            )
+            # print(
+            #     f"Worker {self.worker_id}: Successfully stored {len(points)} embeddings (vector size: {vector_size})"
+            # )
             return len(points)
 
         except Exception as e:
@@ -526,9 +532,9 @@ class MergedRAGWorker:
             return stats
 
         try:
-            print(
-                f"Worker {self.worker_id}: Processing batch of {len(chunk_batch)} chunks"
-            )
+            # print(
+            #     f"Worker {self.worker_id}: Processing batch of {len(chunk_batch)} chunks"
+            # )
 
             embeddings_with_payloads = self._embed_chunks(chunk_batch)
             if not embeddings_with_payloads:
@@ -564,9 +570,9 @@ class MergedRAGWorker:
                 chunks = list(chunks_generator)
                 all_chunks.extend(chunks)
 
-                print(
-                    f"Worker {self.worker_id}: Extracted {len(chunks)} chunks from {filename}"
-                )
+                # print(
+                #     f"Worker {self.worker_id}: Extracted {len(chunks)} chunks from {filename}"
+                # )
 
             except Exception as e:
                 print(f"Worker {self.worker_id}: Error reading {file_path}: {e}")
@@ -868,7 +874,7 @@ def run_merged_rag_pipeline(
         files_per_batch=files_per_batch,
     )
 
-    return pipeline.process_directory(directory_path)
+    return pipeline.process_directory(directory_path), COLLECTION_NAME
 
 
 def run_chunk_based_rag_pipeline(

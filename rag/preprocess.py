@@ -10,7 +10,6 @@ def preprocess_chunk_text(text: str) -> str:
     text = re.sub(r"<[^>]+>", "", text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"\s*,\s*,+", r", ", text)
-    # TODO:text = re.sub(r"\s*[\{\}\[\]]\s*,\s*[\{\}\[\]]", r". ", text)
     text = re.sub(r"\s*\.\s*\.+", r". ", text)
     text = re.sub(r"(,\.)|(\.,)", r". ", text)
     text = re.sub(r"\s+", " ", text)

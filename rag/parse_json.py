@@ -32,6 +32,11 @@ class TreeNode:
 
 
 def parser(data:str):
+    # Make sure data is a string
+    if not isinstance(data, str):
+        print(f"Warning: parser received non-string input of type {type(data)}")
+        data = str(data)
+        
     eof = len(data)-1
     root = TreeNode(0,0,eof)
     parent = root
@@ -40,9 +45,9 @@ def parser(data:str):
     nodes = [root]
     for index in range(eof+1):
         char = data[index]
-        if char == r'{' or char == r'[':
+        if char == '{' or char == '[':
             starts.append(index)
-        elif char == r'}' or char == r']':
+        elif char == '}' or char == ']':
             ends.append(index)
 
     while ends:
@@ -70,28 +75,46 @@ def parser(data:str):
         nodes.append(child)
 
     def create_garbage_nodes(nodes):
+        # Safety check - if no nodes or just one node, return as is
+        if len(nodes) <= 1:
+            return nodes
+            
+        # Ensure all nodes have integer values for start and end
+        for node in nodes:
+            try:
+                node.start = int(node.start)
+                node.end = int(node.end)
+            except (TypeError, ValueError) as e:
+                print(f"Warning: Non-integer node indices found: start={node.start}, end={node.end}")
+                # Set to safe defaults
+                node.start = 0
+                node.end = 0
+                node.status = 0  # Mark as invalid
+        
         nodes = sorted(nodes, key=lambda x: x.start)
         for i in range(1, len(nodes)):
-            starta = nodes[i - 1].start
-            startb = nodes[i].start
-            enda = nodes[i - 1].end
-            endb = nodes[i].end
+            starta = int(nodes[i - 1].start)
+            startb = int(nodes[i].start)
+            enda = int(nodes[i - 1].end)
+            endb = int(nodes[i].end)
             if starta < startb and enda > endb:
                 garbage_node = TreeNode(-1, starta, startb, status=0)
                 nodes.append(garbage_node)
+                
         nodes = sorted(nodes, key=lambda x: x.end, reverse=True)
         for i in range(1, len(nodes)):
-            starta = nodes[i - 1].start
-            startb = nodes[i].start
-            enda = nodes[i - 1].end
-            endb = nodes[i].end
+            starta = int(nodes[i - 1].start)
+            startb = int(nodes[i].start)
+            enda = int(nodes[i - 1].end)
+            endb = int(nodes[i].end)
             if starta < startb and enda > endb:
                 garbage_node = TreeNode(-1, endb, enda, status=0)
                 nodes.append(garbage_node)
+                
         nodes = sorted(nodes, key=lambda x: x.start)
         for i in range(1, len(nodes)):
-            start = nodes[i - 1].end
-            end = nodes[i].start
+            start = int(nodes[i - 1].end)
+            end = int(nodes[i].start)
             if start < end:
                 garbage_node = TreeNode(-1, start, end, status=0)
                 nodes.append(garbage_node)
@@ -101,14 +124,29 @@ def parser(data:str):
     nodes = create_garbage_nodes(nodes)
 
     def create_links(nodes):
-        nodes = sorted(nodes, key=lambda x: x.start)
-        for i in range(1, len(nodes)):
-            node = nodes[i]
-            for j in range(i - 1, -1, -1):
-                parent = nodes[j]
-                if parent.start <= node.start and parent.end >= node.end:
-                    parent.add_child(node)
-                    break
+        # Safety check - if no nodes or just one node, return
+        if len(nodes) <= 1:
+            return
+            
+        try:
+            nodes = sorted(nodes, key=lambda x: x.start)
+            for i in range(1, len(nodes)):
+                node = nodes[i]
+                for j in range(i - 1, -1, -1):
+                    parent = nodes[j]
+                    # Make sure we're comparing integers
+                    node_start = int(node.start)
+                    node_end = int(node.end)
+                    parent_start = int(parent.start)
+                    parent_end = int(parent.end)
+                    
+                    if parent_start <= node_start and parent_end >= node_end:
+                        parent.add_child(node)
+                        break
+        except Exception as e:
+            print(f"Error in create_links: {e}")
+            import traceback
+            traceback.print_exc()
 
     create_links(nodes)
     nodes = sorted(nodes, key=lambda x: x.start)
