@@ -1,33 +1,19 @@
-import os
-from natsort import natsorted
 import re
 
+
+# TODO: Merge into a single replace to improve performance
 def preprocess_chunk_text(text: str) -> str:
-    """Basic text preprocessing before embedding."""
-    text = re.sub(r"\"\w+\"\s*:\s*(null|None)", "", text) # remove keys with None values
-    text = re.sub(r"\"\S{,15}\"\s*:", "", text) # remove keys assuming keys have length <= 15
-    text = re.sub(r"/url\?q=\S+|https?://\S+|www\.\S+", "", text) # remove URLs
-    # comment the next for json structural chunking
-    # text = re.sub(r"\[|\]|\}|\{", " ", text) # remove  brackets
-    text = re.sub(r"(\\n)|(\\)|(\\\")|(\\\')|(\")", " ", text) # remove escaped newlines, and backslashes
-    text = re.sub(r"<[^>]+>", "", text) # remove HTML tags
-    text = re.sub(r"\s+", " ", text)  # Collapse whitespace
-    text = re.sub(r"\s*,\s*,+", r", ", text) # remove multiple commas
-    text = re.sub(r"\s*\.\s*\.+", r". ", text) # remove multiple dots
-    text = re.sub(r"(,\.)|(\.,)", r". ", text) # remove comma and dot when together
-    text = re.sub(r"\s+", " ", text)  # Collapse any remaining whitespaces
+    text = re.sub(r"\"\w+\"\s*:\s*(null|None)", "", text)
+    text = re.sub(r"\"\S{,15}\"\s*:", "", text)
+    text = re.sub(r"/url\?q=\S+|https?://\S+|www\.\S+", "", text)
+    text = re.sub(r"(\\n)|(\\)|(\\\")|(\\\')|(\")", " ", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s*,\s*,+", r", ", text)
+    # TODO:text = re.sub(r"\s*[\{\}\[\]]\s*,\s*[\{\}\[\]]", r". ", text)
+    text = re.sub(r"\s*\.\s*\.+", r". ", text)
+    text = re.sub(r"(,\.)|(\.,)", r". ", text)
+    text = re.sub(r"\s+", " ", text)
     text = text.strip()
+
     return text
-
-if __name__ == "__main__":
-    files = os.listdir(r"C:\Users\22bcscs055\Downloads\mock_data")
-    files = natsorted(files)
-    for fname in files:
-        print(rf"C:\Users\22bcscs055\Downloads\mock_data\{fname}")
-        text = ' '
-        with open(rf"C:\Users\22bcscs055\Downloads\mock_data\{fname}","r",encoding="utf-8") as g:
-            text = preprocess_chunk_text(g.read())
-        os.makedirs(rf"C:\Users\22bcscs055\Downloads\mock_data_half_processed", exist_ok=True)
-        with open(rf"C:\Users\22bcscs055\Downloads\mock_data_half_processed\{fname}", "w", encoding="utf-8") as f:
-            f.write(text)
-
