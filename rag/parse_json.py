@@ -1,14 +1,5 @@
 class TreeNode:
-    """
-    A class representing a node in a tree data structure.
-    """
-    def __init__(self, id, start, end, status = 1):
-        """
-        Initializes a new node.
-        
-        Args:
-            status: 0 if incomplete file 1 if complete dict found
-        """
+    def __init__(self, id, start, end, status=1):
         self.data = id
         self.start = start
         self.end = end
@@ -17,30 +8,14 @@ class TreeNode:
         self.parent = None
 
     def add_child(self, child_node):
-        """
-        Adds a child node to the current node.
-        
-        Args:
-            child_node (TreeNode): The node to be added as a child.
-        """
-        child_node.parent = self  # Set the current node as the parent of the child
+        child_node.parent = self
         self.children.append(child_node)
 
     def remove_child(self, child_node):
-        """
-        Removes a child node from the current node.
-        
-        Args:
-            child_node (TreeNode): The node to be removed from the children.
-        """
-        child_node.parent = None  # Remove the parent reference from the child
+        child_node.parent = None
         self.children.remove(child_node)
 
     def get_level(self):
-        """
-        Returns the level (or depth) of the current node in the tree.
-        The root node is at level 0.
-        """
         level = 0
         p = self.parent
         while p:
@@ -49,28 +24,25 @@ class TreeNode:
         return level
 
     def print_tree(self):
-        """
-        Prints the tree structure starting from the current node.
-        """
-        prefix = ' ' * self.get_level() * 3 + '|-- ' if self.parent else ""
+        prefix = " " * self.get_level() * 3 + "|-- " if self.parent else ""
         print(prefix + str(self.start) + "\t" + str(self.end))
         if self.children:
             for child in self.children:
                 child.print_tree()
 
 
-def parser(data:str):
+def parser(data: str):
     eof = len(data)
-    root = TreeNode(0,0,eof)
+    root = TreeNode(0, 0, eof)
     parent = root
     starts = []
     ends = []
     nodes = [root]
     for index in range(eof):
         char = data[index]
-        if char == '{' or char == '[':
+        if char == "{" or char == "[":
             starts.append(index)
-        elif char == '}' or char == ']':
+        elif char == "}" or char == "]":
             ends.append(index)
 
     while ends:
@@ -98,40 +70,36 @@ def parser(data:str):
         nodes.append(child)
 
     def create_garbage_nodes(nodes):
-        
         nodes = sorted(nodes, key=lambda x: x.start)
         for i in range(1, len(nodes)):
-            starta = nodes[i-1].start
+            starta = nodes[i - 1].start
             startb = nodes[i].start
-            enda = nodes[i-1].end
+            enda = nodes[i - 1].end
             endb = nodes[i].end
             if starta < startb and enda > endb:
                 garbage_node = TreeNode(-1, starta, startb, status=0)
                 nodes.append(garbage_node)
         nodes = sorted(nodes, key=lambda x: x.end, reverse=True)
         for i in range(1, len(nodes)):
-            starta = nodes[i-1].start
+            starta = nodes[i - 1].start
             startb = nodes[i].start
-            enda = nodes[i-1].end
+            enda = nodes[i - 1].end
             endb = nodes[i].end
             if starta < startb and enda > endb:
-                
                 garbage_node = TreeNode(-1, endb, enda, status=0)
                 nodes.append(garbage_node)
         nodes = sorted(nodes, key=lambda x: x.start)
         for i in range(1, len(nodes)):
-            start = nodes[i-1].end
+            start = nodes[i - 1].end
             end = nodes[i].start
             if start < end:
                 if start == 6 and end == 8:
-                    print(nodes[i-1].start, nodes[i-1].end)
+                    print(nodes[i - 1].start, nodes[i - 1].end)
                     print(nodes[i].start, nodes[i].end)
                 garbage_node = TreeNode(-1, start, end, status=0)
                 nodes.append(garbage_node)
 
-
         return nodes
-        
 
     nodes = create_garbage_nodes(nodes)
 
@@ -145,15 +113,6 @@ def parser(data:str):
                     parent.add_child(node)
                     break
 
-
     create_links(nodes)
-    nodes = sorted(nodes, key = lambda x: x.start)
+    nodes = sorted(nodes, key=lambda x: x.start)
     return nodes[0]
-
-
-# data = r" } { { } { { } } { { } } } "
-# node = parser(data)
-# print(node.start, node.end)
-# nodes[0].print_tree()
-# print(len(nodes))
-# print([[nodes[i].start,nodes[i].end] for i in range(len(nodes))])
