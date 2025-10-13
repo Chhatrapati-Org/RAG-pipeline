@@ -121,8 +121,8 @@ class SharedEmbeddingModel:
 
     def embed_sentences(self, texts: List[str]) -> List[List[float]]:
         """
-        Generate all three types of embeddings for documents.
-        Returns: (dense_embeddings, sparse_embeddings, reranker_embeddings)
+        Generate only dense embeddings for sentences (used in semantic chunking).
+        Returns: dense_embeddings (List of embedding vectors)
         """
         with self._lock:
             dense_model = self.get_dense_model()
