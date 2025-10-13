@@ -7,10 +7,10 @@ from typing import Any, Dict, Generator, List, Tuple
 import math
 
 import torch
+from fastembed import TextEmbedding, SparseTextEmbedding, LateInteractionTextEmbedding
 from langchain_community.utils.math import cosine_similarity
-from langchain_huggingface import HuggingFaceEmbeddings
 from nltk.tokenize import sent_tokenize
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import Distance, PointStruct, VectorParams, SparseVectorParams, Modifier, MultiVectorConfig, MultiVectorComparator, HnswConfigDiff
 from tqdm import tqdm
 
 from rag.parse_json import parser
@@ -23,7 +23,9 @@ COLLECTION_NAME = "ps04_" + formatted_now
 
 class SharedEmbeddingModel:
     _instance = None
-    _model = None
+    _dense_model = None
+    _sparse_model = None
+    _reranker_model = None
     _lock = Lock()
     _initialized = False
 
@@ -35,92 +37,124 @@ class SharedEmbeddingModel:
         return cls._instance
 
     def initialize_model(
-        self, qdrant_client, model_name: str = "BAAI/bge-base-en-v1.5"
+        self, 
+        qdrant_client,
+        dense_model_name: str = "BAAI/bge-base-en-v1.5",
+        sparse_model_name: str = "naver/splade-cocondenser-ensembledistil",
+        reranker_model_name: str = "colbert-ir/colbertv2.0"
     ):
         with self._lock:
-            if self._initialized and self._model is not None:
-                return self._model
+            if self._initialized:
+                return
 
-            print(f"Initializing shared embedding model: {model_name}")
+            print("Initializing hybrid embedding models...")
+            print(f"  Dense: {dense_model_name}")
+            print(f"  Sparse: {sparse_model_name}")
+            print(f"  Reranker: {reranker_model_name}")
 
             try:
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                print(f"Using device: {device}")
+                # Initialize dense embedding model
+                self._dense_model = TextEmbedding(dense_model_name)
+                print("✅ Dense model initialized")
 
-                model_kwargs = {"device": device}
-                encode_kwargs = {"normalize_embeddings": True}
+                # Initialize sparse embedding model (SPLADE)
+                self._sparse_model = SparseTextEmbedding(sparse_model_name)
+                print("✅ Sparse model initialized")
 
-                try:
-                    self._model = HuggingFaceEmbeddings(
-                        model_name=model_name,
-                        model_kwargs=model_kwargs,
-                        encode_kwargs=encode_kwargs,
-                    )
-                    print("✅ Shared model initialized successfully")
+                # Initialize late interaction model (ColBERT)
+                self._reranker_model = LateInteractionTextEmbedding(reranker_model_name)
+                print("✅ Reranker model initialized")
 
-                except Exception as primary_error:
-                    print(f"Primary initialization failed: {primary_error}")
-                    print("Trying CPU-only initialization...")
+                # Test embeddings to get dimensions
+                test_text = ["Test sentence"]
+                test_dense = list(self._dense_model.embed(test_text))[0]
+                test_sparse = list(self._sparse_model.embed(test_text))[0]
+                test_reranker = list(self._reranker_model.embed(test_text))[0]
 
-                    model_kwargs = {"device": "cpu"}
-                    self._model = HuggingFaceEmbeddings(
-                        model_name=model_name,
-                        model_kwargs=model_kwargs,
-                        encode_kwargs=encode_kwargs,
-                    )
-                    print("✅ Shared model initialized on CPU")
+                dense_dim = len(test_dense)
+                reranker_dim = len(test_reranker[0])  # ColBERT produces multi-vectors
+                
+                print(f"✅ Dense vectors: {dense_dim} dimensions")
+                print(f"✅ Reranker vectors: {reranker_dim} dimensions (multi-vector)")
 
-                test_embedding = self._model.embed_documents(["Test sentence"])
-                vector_size = len(test_embedding[0])
-                print(f"✅ Model produces {vector_size}-dimensional vectors")
-
-                initialize_collection_if_needed(qdrant_client, vector_size)
+                initialize_collection_if_needed(qdrant_client, dense_dim, reranker_dim)
 
                 self._initialized = True
-                return self._model
+                print("✅ All embedding models ready")
 
             except Exception as e:
-                print(f"❌ Failed to initialize shared model: {e}")
-                raise RuntimeError("Cannot initialize any embedding model")
+                print(f"❌ Failed to initialize embedding models: {e}")
+                raise RuntimeError("Cannot initialize embedding models")
 
-    def get_model(self):
-        if not self._initialized or self._model is None:
-            raise RuntimeError("Model not initialized. Call initialize_model() first.")
-        return self._model
+    def get_dense_model(self):
+        if not self._initialized or self._dense_model is None:
+            raise RuntimeError("Models not initialized. Call initialize_model() first.")
+        return self._dense_model
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+    def get_sparse_model(self):
+        if not self._initialized or self._sparse_model is None:
+            raise RuntimeError("Models not initialized. Call initialize_model() first.")
+        return self._sparse_model
+
+    def get_reranker_model(self):
+        if not self._initialized or self._reranker_model is None:
+            raise RuntimeError("Models not initialized. Call initialize_model() first.")
+        return self._reranker_model
+
+    def embed_documents(self, texts: List[str]) -> Tuple[List[List[float]], List[Any], List[List[List[float]]]]:
+        """
+        Generate all three types of embeddings for documents.
+        Returns: (dense_embeddings, sparse_embeddings, reranker_embeddings)
+        """
         with self._lock:
-            model = self.get_model()
-            return model.embed_documents(texts)
+            dense_model = self.get_dense_model()
+            sparse_model = self.get_sparse_model()
+            reranker_model = self.get_reranker_model()
+            
+            # Generate embeddings
+            dense_embeddings = list(dense_model.embed(texts))
+            sparse_embeddings = list(sparse_model.embed(texts))
+            reranker_embeddings = list(reranker_model.embed(texts))
+            
+            return dense_embeddings, sparse_embeddings, reranker_embeddings
 
 
-def initialize_collection_if_needed(client, vector_size: int):
+def initialize_collection_if_needed(client, dense_dim: int, reranker_dim: int):
+    """Initialize Qdrant collection with hybrid search configuration."""
     if not client.collection_exists(COLLECTION_NAME):
-        print(
-            f"Creating Qdrant collection '{COLLECTION_NAME}' with vector size {vector_size}"
-        )
+        print(f"Creating Qdrant collection '{COLLECTION_NAME}' with hybrid search support")
+        print(f"  Dense embedding: {dense_dim}D")
+        print(f"  Reranker embedding: {reranker_dim}D (multi-vector)")
+        
         client.create_collection(
             collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            vectors_config={
+                "dense_embedding": VectorParams(
+                    size=dense_dim,
+                    distance=Distance.COSINE,
+                ),
+                "reranker": VectorParams(
+                    size=reranker_dim,
+                    distance=Distance.COSINE,
+                    multivector_config=MultiVectorConfig(
+                        comparator=MultiVectorComparator.MAX_SIM,
+                    ),
+                    hnsw_config=HnswConfigDiff(m=0)  # Disable HNSW for reranking
+                ),
+            },
+            sparse_vectors_config={
+                "sparse_embedding": SparseVectorParams(
+                    modifier=Modifier.IDF
+                )
+            }
         )
+        print("✅ Hybrid search collection created")
     else:
         try:
             collection_info = client.get_collection(COLLECTION_NAME)
-            existing_size = collection_info.config.params.vectors.size
-            if existing_size != vector_size:
-                print(
-                    f"Warning: Existing collection has vector size {existing_size}, but model produces {vector_size}"
-                )
-                print(
-                    f"Deleting existing collection and recreating with correct size..."
-                )
-                client.delete_collection(COLLECTION_NAME)
-                client.create_collection(
-                    collection_name=COLLECTION_NAME,
-                    vectors_config=VectorParams(
-                        size=vector_size, distance=Distance.COSINE
-                    ),
-                )
+            print(f"✅ Collection '{COLLECTION_NAME}' already exists")
+        except Exception as e:
+            print(f"Warning: Error checking collection: {e}")
         except Exception as e:
             print(f"Error checking collection: {e}")
 
@@ -145,13 +179,10 @@ class MergedRAGWorker:
     ):
         self.worker_id = worker_id
         self.chunk_size_bytes = chunk_size_kb * 1000
-        self.shared_model = shared_model or SharedEmbeddingModel()
+        self.shared_model = shared_model if shared_model is not None else SharedEmbeddingModel()
         self.qdrant_client = qdrant_client
         self.point_id_counter = worker_id * 10000  # Unique ID range per worker
         # print(f"Worker {self.worker_id}: Initialized with shared model")
-
-    def get_model(self):
-        return self.shared_model.get_model()
 
     def _read_txt_file_chunks(
         self, file_path: str
@@ -363,7 +394,11 @@ class MergedRAGWorker:
 
     def _embed_chunks(
         self, chunks: List[Tuple[str, str, int]]
-    ) -> List[Tuple[List[float], Dict[str, Any]]]:
+    ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """
+        Generate hybrid embeddings (dense, sparse, reranker) for chunks.
+        Returns: List of (embeddings_dict, payload_dict) tuples
+        """
         if not chunks:
             return []
 
@@ -385,13 +420,15 @@ class MergedRAGWorker:
             texts = [chunk[0] for chunk in valid_chunks]
             chunks = valid_chunks
 
-            # print(f"Worker {self.worker_id}: Embedding {len(texts)} text chunks...")
+            # print(f"Worker {self.worker_id}: Embedding {len(texts)} text chunks with hybrid models...")
 
             try:
-                embeddings = self.shared_model.embed_documents(texts)
-                if not embeddings or len(embeddings) != len(texts):
+                # Generate all three types of embeddings
+                dense_embeddings, sparse_embeddings, reranker_embeddings = self.shared_model.embed_documents(texts)
+                
+                if not dense_embeddings or len(dense_embeddings) != len(texts):
                     print(
-                        f"Worker {self.worker_id}: Embedding count mismatch - expected {len(texts)}, got {len(embeddings) if embeddings else 0}"
+                        f"Worker {self.worker_id}: Embedding count mismatch - expected {len(texts)}, got {len(dense_embeddings) if dense_embeddings else 0}"
                     )
                     return []
 
@@ -406,6 +443,13 @@ class MergedRAGWorker:
 
             results = []
             for i, (chunk_text, filename, chunk_id) in enumerate(chunks):
+                # Create embeddings dictionary with all three types
+                embeddings_dict = {
+                    "dense_embedding": dense_embeddings[i],
+                    "sparse_embedding": sparse_embeddings[i],
+                    "reranker": reranker_embeddings[i]
+                }
+                
                 payload = {
                     "filename": filename,
                     "chunk_id": chunk_id,
@@ -413,11 +457,10 @@ class MergedRAGWorker:
                     "chunk_size": len(chunk_text.encode("utf-8")),
                     "worker_id": self.worker_id,
                 }
-                results.append((embeddings[i], payload))
-                # TODO: Remove threshold from payload if not using semantic chunking or special json chunking
+                results.append((embeddings_dict, payload))
 
             # print(
-            #     f"Worker {self.worker_id}: Successfully embedded {len(results)} chunks"
+            #     f"Worker {self.worker_id}: Successfully embedded {len(results)} chunks with hybrid embeddings"
             # )
             return results
 
@@ -428,32 +471,30 @@ class MergedRAGWorker:
             return []
 
     def _store_embeddings(
-        self, embeddings_with_payloads: List[Tuple[List[float], Dict[str, Any]]]
+        self, embeddings_with_payloads: List[Tuple[Dict[str, Any], Dict[str, Any]]]
     ) -> int:
+        """
+        Store hybrid embeddings (dense, sparse, reranker) in Qdrant.
+        """
         if not embeddings_with_payloads:
             return 0
 
         try:
-
-            first_embedding = embeddings_with_payloads[0][0]
-            vector_size = len(first_embedding)
-
-            initialize_collection_if_needed(self.qdrant_client, vector_size)
-
             points = []
-            for embedding, payload in embeddings_with_payloads:
+            for embeddings_dict, payload in embeddings_with_payloads:
                 self.point_id_counter += 1
 
-                if len(embedding) != vector_size:
-                    print(
-                        f"Worker {self.worker_id}: Warning - embedding size mismatch: expected {vector_size}, got {len(embedding)}"
-                    )
-                    continue
-
+                # Convert sparse embedding to proper format
+                sparse_embedding = embeddings_dict["sparse_embedding"]
+                
                 points.append(
                     PointStruct(
                         id=self.point_id_counter,
-                        vector=embedding,
+                        vector={
+                            "dense_embedding": embeddings_dict["dense_embedding"],
+                            "sparse_embedding": sparse_embedding.as_object(),
+                            "reranker": embeddings_dict["reranker"]
+                        },
                         payload=payload,
                     )
                 )
@@ -468,7 +509,7 @@ class MergedRAGWorker:
             )
 
             # print(
-            #     f"Worker {self.worker_id}: Successfully stored {len(points)} embeddings (vector size: {vector_size})"
+            #     f"Worker {self.worker_id}: Successfully stored {len(points)} hybrid embeddings"
             # )
             return len(points)
 

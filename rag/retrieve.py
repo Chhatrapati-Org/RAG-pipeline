@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import Any, Dict, List, Tuple
 
+from qdrant_client import models
 from tqdm import tqdm
 
 from rag.pipeline import SharedEmbeddingModel
@@ -80,21 +81,44 @@ class MultiThreadedRetriever:
         query_text = query_data["query"]
 
         try:
-            # Encode the query using shared model
-            query_embedding = self.shared_model.embed_documents([query_text])[0]
+            # Generate all three types of embeddings for the query
+            dense_embeddings, sparse_embeddings, reranker_embeddings = self.shared_model.embed_documents([query_text])
+            
+            # Extract single query embeddings
+            dense_vector = dense_embeddings[0]
+            sparse_vector = sparse_embeddings[0]
+            reranker_vector = reranker_embeddings[0]
 
-            # Search for similar chunks in Qdrant
-            search_results = self.qdrant_client.search(
+            # Hybrid search with prefetch (dense + sparse), then rerank with ColBERT
+            # Prefetch top 20 from dense and sparse, then rerank to get top_k
+            prefetch_limit = 20
+            
+            prefetch = [
+                models.Prefetch(
+                    query=dense_vector,
+                    using="dense_embedding",
+                    limit=prefetch_limit,
+                ),
+                models.Prefetch(
+                    query=models.SparseVector(**sparse_vector.as_object()),
+                    using="sparse_embedding",
+                    limit=prefetch_limit,
+                ),
+            ]
+
+            # Perform hybrid search with reranking
+            search_results = self.qdrant_client.query_points(
                 collection_name=self.collection_name,
-                query_vector=query_embedding,
-                limit=self.top_k,
+                prefetch=prefetch,
+                query=reranker_vector,
+                using="reranker",
                 with_payload=True,
-                with_vectors=False,  # We don't need the vectors in results
+                limit=self.top_k,
             )
 
             # Format results
             chunks = []
-            for i, result in enumerate(search_results, 1):
+            for i, result in enumerate(search_results.points, 1):
                 chunk_data = {
                     f"chunk_{i}_text": result.payload.get("text", ""),
                     f"chunk_{i}_filename": result.payload.get("filename", ""),
@@ -102,7 +126,8 @@ class MultiThreadedRetriever:
                     f"chunk_{i}_chunk_id": result.id,
                 }
                 chunks.append(chunk_data)
-            files = [result.payload.get("filename", "") for result in search_results]
+            files = [result.payload.get("filename", "") for result in search_results.points]
+            
             # Create result structure
             result_data = {
                 "query_num": query_num,
@@ -118,6 +143,8 @@ class MultiThreadedRetriever:
 
         except Exception as e:
             print(f"❌ Error processing query {query_num}: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 "query_num": query_num,
                 "query": query_text,
