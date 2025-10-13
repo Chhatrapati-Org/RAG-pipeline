@@ -43,11 +43,10 @@ class MultiThreadedRetriever:
                 )
 
             collection_info = self.qdrant_client.get_collection(self.collection_name)
-            vector_size = collection_info.config.params.vectors.size
             point_count = self.qdrant_client.count(self.collection_name).count
 
             print(f"✅ Collection '{self.collection_name}' found:")
-            print(f"   - Vector dimensions: {vector_size}")
+            print(f"   - Collection type: Hybrid search (dense + sparse + reranker)")
             print(f"   - Total points: {point_count}")
 
         except Exception as e:

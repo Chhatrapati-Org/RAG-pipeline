@@ -119,6 +119,19 @@ class SharedEmbeddingModel:
             return dense_embeddings, sparse_embeddings, reranker_embeddings
 
 
+    def embed_sentences(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate all three types of embeddings for documents.
+        Returns: (dense_embeddings, sparse_embeddings, reranker_embeddings)
+        """
+        with self._lock:
+            dense_model = self.get_dense_model()
+            
+            # Generate embeddings
+            dense_embeddings = list(dense_model.embed(texts))
+            
+            return dense_embeddings
+
 def initialize_collection_if_needed(client, dense_dim: int, reranker_dim: int):
     """Initialize Qdrant collection with hybrid search configuration."""
     if not client.collection_exists(COLLECTION_NAME):
@@ -322,9 +335,10 @@ class MergedRAGWorker:
             combined_sentences.append(sentences[i - 1] + sentences[i])
         # We combine two sentences to get better context for similarity
         for i in range(1, len(sentences)):
-            embeddings = self.shared_model.embed_documents(combined_sentences)
-            current = embeddings[i]
-            prev = embeddings[i - 1]
+            # Use only dense embeddings for semantic similarity comparison
+            dense_embeddings = self.shared_model.embed_sentences(combined_sentences)
+            current = dense_embeddings[i]
+            prev = dense_embeddings[i - 1]
 
             similarity = cosine_similarity([prev],[current])[0][0]
             distances.append(1- similarity)
