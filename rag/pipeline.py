@@ -4,6 +4,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import Any, Dict, Generator, List, Tuple
+import math
 
 import torch
 from langchain_community.utils.math import cosine_similarity
@@ -337,13 +338,13 @@ class MergedRAGWorker:
             return
 
         while text:
-            if len(text.encode("utf-8")) <= max_size:
+            size = len(text.encode("utf-8"))
+            if size <= max_size:
                 yield text
                 break
 
-            split_point = max_size
+            split_point = size // math.ceil(size / max_size)
             temp_text = text[:split_point]
-
             sentence_end = max(
                 temp_text.rfind(". "), temp_text.rfind("! "), temp_text.rfind("? ")
             )
