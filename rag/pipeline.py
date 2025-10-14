@@ -40,7 +40,7 @@ class SharedEmbeddingModel:
         self, 
         qdrant_client,
         dense_model_name: str = "BAAI/bge-base-en-v1.5",
-        sparse_model_name: str = "naver/splade-cocondenser-ensembledistil",
+        sparse_model_name: str = "prithivida/Splade_PP_en_v1",
         reranker_model_name: str = "colbert-ir/colbertv2.0"
     ):
         with self._lock:
