@@ -3,7 +3,7 @@ import re
 import zipfile
 from pathlib import Path
 from typing import List, Optional
-
+import time
 import typer
 from qdrant_client import QdrantClient
 
@@ -24,6 +24,7 @@ def ingest_merged(
     chunk_size_kb: int = typer.Option(1, help="Max chunk size in KB"),
     files_per_batch: int = typer.Option(20, help="Files per worker batch"),
 ):
+    start = time.time()
     stats, _ = run_merged_rag_pipeline(
         qdrant_client=qdrant_client,
         directory_path=directory_path,
@@ -31,6 +32,8 @@ def ingest_merged(
         chunk_size_kb=chunk_size_kb,
         files_per_batch=files_per_batch,
     )
+    end = time.time()
+    stats['time_taken'] = end - start / 60  # in minutes
     typer.echo(json.dumps(stats, indent=2))
 
 
@@ -41,6 +44,7 @@ def ingest_chunks(
     chunk_size_kb: int = typer.Option(1, help="Max chunk size in KB"),
     chunks_per_batch: int = typer.Option(50, help="Chunks per worker batch"),
 ):
+    start = time.time()
     stats = run_chunk_based_rag_pipeline(
         qdrant_client=qdrant_client,
         directory_path=directory_path,
@@ -48,6 +52,8 @@ def ingest_chunks(
         chunk_size_kb=chunk_size_kb,
         chunks_per_batch=chunks_per_batch,
     )
+    end = time.time()
+    stats['time_taken'] = end - start / 60  # in minutes
     typer.echo(json.dumps(stats, indent=2))
 
 # TODO: Run DOCKER image of Qdrant if not running
@@ -62,6 +68,7 @@ def retrieve(
     top_k: int = typer.Option(5, help="Top-k similar chunks per query"),
     queries_per_batch: int = typer.Option(50, help="Queries per worker batch"),
 ):
+    start = time.time()
     results = run_multithreaded_retrieval(
         COLLECTION_NAME=collection_name,
         qdrant_client=qdrant_client,
@@ -71,14 +78,16 @@ def retrieve(
         top_k=top_k,
         queries_per_batch=queries_per_batch,
     )
+    end = time.time()
     typer.echo(json.dumps(results, indent=2, ensure_ascii=False))
+    typer.echo(f"Time taken: {end - start / 60} minutes")
 
 @app.command("embed-retrieve")
 def embed_retrieve():
     directory_path = input("Enter the Directory containing input files:")
     queries_file_path = input("Enter the Path to queries JSON file:")
     output_file_path = input("Enter the Path to save retrieval results JSON (Do not skip):")
-    
+    start = time.time()
     stats, collection_name = run_merged_rag_pipeline(
         qdrant_client=qdrant_client,
         directory_path=directory_path,
@@ -86,8 +95,10 @@ def embed_retrieve():
         chunk_size_kb=1,
         files_per_batch=20,
     )
+    end = time.time()
+    stats['time_taken'] = end - start / 60  # in minutes
     typer.echo(json.dumps(stats, indent=2))
-
+    init = time.time()
     results = run_multithreaded_retrieval(
         COLLECTION_NAME=collection_name,
         qdrant_client=qdrant_client,
@@ -97,6 +108,8 @@ def embed_retrieve():
         top_k=5,
         queries_per_batch=20,
     )
+    fin = time.time()
+    typer.echo(f"Time taken for retrieval: {fin - init / 60} minutes")
     # typer.echo(json.dumps(results, indent=2, ensure_ascii=False))
 
 
