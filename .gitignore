@@ -5,3 +5,4 @@ rag/__pycache__/*
 json_file/*.json
 retrieval_results*.json
 snippets.ipynb
+model_cache/*

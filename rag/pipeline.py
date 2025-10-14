@@ -12,6 +12,7 @@ from langchain_community.utils.math import cosine_similarity
 from nltk.tokenize import sent_tokenize
 from qdrant_client.models import Distance, PointStruct, VectorParams, SparseVectorParams, Modifier, MultiVectorConfig, MultiVectorComparator, HnswConfigDiff
 from tqdm import tqdm
+import onnxruntime as ort
 
 from rag.parse_json import parser
 from rag.preprocess import preprocess_chunk_text
@@ -54,17 +55,34 @@ class SharedEmbeddingModel:
 
             try:
                 # Initialize dense embedding model
-                self._dense_model = TextEmbedding(dense_model_name)
-                print("✅ Dense model initialized")
-
-                # Initialize sparse embedding model (SPLADE)
-                self._sparse_model = SparseTextEmbedding(sparse_model_name)
-                print("✅ Sparse model initialized")
-
-                # Initialize late interaction model (ColBERT)
-                self._reranker_model = LateInteractionTextEmbedding(reranker_model_name)
-                print("✅ Reranker model initialized")
-
+                available_providers = ort.get_available_providers()
+                print(f"Available ONNX providers: {available_providers}")
+                
+                # Set providers - prefer CUDA
+                if 'CUDAExecutionProvider' in available_providers:
+                    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+                    print("Using CUDA for acceleration")
+                else:
+                    providers = ['CPUExecutionProvider']
+                    print("CUDA not available, using CPU")
+                    
+                self._dense_model = TextEmbedding(
+                    model_name=dense_model_name,
+                    providers=providers,  # Use GPU if available
+                    cache_dir="./model_cache"
+                )
+                
+                self._sparse_model = SparseTextEmbedding(
+                    model_name=sparse_model_name,
+                    providers=providers,  # Use GPU if available
+                    cache_dir="./model_cache"
+                )
+                
+                self._reranker_model = LateInteractionTextEmbedding(
+                    model_name=reranker_model_name,
+                    providers=providers,  # Use GPU if available
+                    cache_dir="./model_cache"
+                )
                 # Test embeddings to get dimensions
                 test_text = ["Test sentence"]
                 test_dense = list(self._dense_model.embed(test_text))[0]

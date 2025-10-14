@@ -82,7 +82,7 @@ def embed_retrieve():
     stats, collection_name = run_merged_rag_pipeline(
         qdrant_client=qdrant_client,
         directory_path=directory_path,
-        max_workers=20,
+        max_workers=15,
         chunk_size_kb=1,
         files_per_batch=20,
     )
