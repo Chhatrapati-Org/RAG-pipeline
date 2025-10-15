@@ -33,7 +33,7 @@ def ingest_merged(
         files_per_batch=files_per_batch,
     )
     end = time.time()
-    stats['time_taken'] = end - start / 60  # in minutes
+    stats['time_taken'] = (end - start) / 60  # in minutes
     typer.echo(json.dumps(stats, indent=2))
 
 
@@ -53,7 +53,7 @@ def ingest_chunks(
         chunks_per_batch=chunks_per_batch,
     )
     end = time.time()
-    stats['time_taken'] = end - start / 60  # in minutes
+    stats['time_taken'] = (end - start) / 60  # in minutes
     typer.echo(json.dumps(stats, indent=2))
 
 # TODO: Run DOCKER image of Qdrant if not running
@@ -91,7 +91,7 @@ def retrieve(
     )
     end = time.time()
     typer.echo(json.dumps(results, indent=2, ensure_ascii=False))
-    typer.echo(f"Time taken: {end - start / 60} minutes")
+    typer.echo(f"Time taken: {(end - start) / 60} minutes")
 
 @app.command("embed-retrieve")
 def embed_retrieve():
@@ -107,7 +107,7 @@ def embed_retrieve():
         files_per_batch=20,
     )
     end = time.time()
-    stats['time_taken'] = end - start / 60  # in minutes
+    stats['time_taken'] = (end - start) / 60  # in minutes
     typer.echo(json.dumps(stats, indent=2))
     init = time.time()
     results = run_multithreaded_retrieval(
