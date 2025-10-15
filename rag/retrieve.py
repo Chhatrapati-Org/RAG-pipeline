@@ -20,12 +20,14 @@ class MultiThreadedRetriever:
         max_workers: int = 4,
         top_k: int = 5,
         queries_per_batch: int = 10,
+        unique_per_filename: bool = True,  # New parameter to control grouping
     ):
         self.qdrant_client = qdrant_client
         self.collection_name = COLLECTION_NAME
         self.max_workers = max_workers
         self.top_k = top_k
         self.queries_per_batch = queries_per_batch
+        self.unique_per_filename = unique_per_filename  # Enable/disable unique filename filtering
         self.lock = Lock()
 
         print("Initializing shared embedding model for retrieval...")
@@ -48,9 +50,46 @@ class MultiThreadedRetriever:
             print(f"✅ Collection '{self.collection_name}' found:")
             print(f"   - Collection type: Hybrid search (dense + sparse + reranker)")
             print(f"   - Total points: {point_count}")
+            print(f"   - Unique filename filtering: {'Enabled' if self.unique_per_filename else 'Disabled'}")
 
         except Exception as e:
             raise RuntimeError(f"Error verifying collection: {e}")
+    
+    def _get_unique_by_filename(self, search_results, limit: int):
+        """
+        Group results by filename and keep only the highest scoring result per filename.
+        
+        Args:
+            search_results: Qdrant search results
+            limit: Maximum number of unique filenames to return
+            
+        Returns:
+            List of top results with unique filenames
+        """
+        unique_results = {}
+        
+        for result in search_results.points:
+            filename = result.payload.get("filename", "")
+            
+            # Skip empty filenames
+            if not filename:
+                continue
+            
+            # Keep the highest scoring result for each filename
+            if filename not in unique_results or result.score > unique_results[filename]["score"]:
+                unique_results[filename] = {
+                    "result": result,
+                    "score": result.score
+                }
+        
+        # Sort by score (descending) and take top limit
+        sorted_unique = sorted(
+            unique_results.values(), 
+            key=lambda x: x["score"], 
+            reverse=True
+        )[:limit]
+        
+        return [item["result"] for item in sorted_unique]
 
     def load_queries(self, queries_file_path: str) -> List[Dict[str, str]]:
         try:
@@ -89,8 +128,10 @@ class MultiThreadedRetriever:
             reranker_vector = reranker_embeddings[0]
 
             # Hybrid search with prefetch (dense + sparse), then rerank with ColBERT
-            # Prefetch top 20 from dense and sparse, then rerank to get top_k
-            prefetch_limit = 20
+            # Fetch more results than needed to ensure unique filenames after grouping
+            # If you want top_k unique files, fetch top_k * 3 to account for duplicates
+            prefetch_limit = self.top_k * 5  # Increased to get more candidates
+            fetch_limit = self.top_k * 3  # Fetch 3x more results for grouping
             
             prefetch = [
                 models.Prefetch(
@@ -112,12 +153,19 @@ class MultiThreadedRetriever:
                 query=reranker_vector,
                 using="reranker",
                 with_payload=True,
-                limit=self.top_k,
+                limit=fetch_limit,  # Fetch more results than needed
             )
 
+            # Apply unique filename filtering if enabled
+            if self.unique_per_filename:
+                final_results = self._get_unique_by_filename(search_results, self.top_k)
+            else:
+                # Just take top_k results without grouping
+                final_results = search_results.points[:self.top_k]
+            
             # Format results
             chunks = []
-            for i, result in enumerate(search_results.points, 1):
+            for i, result in enumerate(final_results, 1):
                 chunk_data = {
                     f"chunk_{i}_text": result.payload.get("text", ""),
                     f"chunk_{i}_filename": result.payload.get("filename", ""),
@@ -125,7 +173,8 @@ class MultiThreadedRetriever:
                     f"chunk_{i}_chunk_id": result.id,
                 }
                 chunks.append(chunk_data)
-            files = [result.payload.get("filename", "") for result in search_results.points]
+            
+            files = [result.payload.get("filename", "") for result in final_results]
             
             # Create result structure
             result_data = {
@@ -261,13 +310,32 @@ def run_multithreaded_retrieval(
     max_workers: int = 16,
     top_k: int = 5,
     queries_per_batch: int = 20,
+    unique_per_filename: bool = True,  # New parameter: enable unique filename filtering
 ) -> List[Dict[str, Any]]:
+    """
+    Run multithreaded retrieval on queries.
+    
+    Args:
+        COLLECTION_NAME: Name of the Qdrant collection
+        qdrant_client: Qdrant client instance
+        queries_file_path: Path to queries JSON file
+        output_file_path: Optional path to save results
+        max_workers: Number of concurrent workers
+        top_k: Number of results to return per query
+        queries_per_batch: Number of queries per batch
+        unique_per_filename: If True, returns only the highest scoring chunk per unique filename
+                            If False, returns top_k chunks regardless of filename
+    
+    Returns:
+        List of retrieval results
+    """
     retriever = MultiThreadedRetriever(
         COLLECTION_NAME=COLLECTION_NAME,
         qdrant_client=qdrant_client,
         max_workers=max_workers,
         top_k=top_k,
         queries_per_batch=queries_per_batch,
+        unique_per_filename=unique_per_filename,
     )
 
     return retriever.process_queries(queries_file_path, output_file_path)

@@ -67,7 +67,17 @@ def retrieve(
     max_workers: int = typer.Option(20, help="Number of worker threads"),
     top_k: int = typer.Option(5, help="Top-k similar chunks per query"),
     queries_per_batch: int = typer.Option(50, help="Queries per worker batch"),
+    unique_files: bool = typer.Option(
+        True, "--unique-files/--allow-duplicates", 
+        help="Return only highest scoring chunk per unique filename"
+    ),
 ):
+    """
+    Retrieve relevant documents for queries using hybrid search.
+    
+    By default, returns unique filenames (highest scoring chunk per file).
+    Use --allow-duplicates to get top-k chunks regardless of filename.
+    """
     start = time.time()
     results = run_multithreaded_retrieval(
         COLLECTION_NAME=collection_name,
@@ -77,6 +87,7 @@ def retrieve(
         max_workers=max_workers,
         top_k=top_k,
         queries_per_batch=queries_per_batch,
+        unique_per_filename=unique_files,
     )
     end = time.time()
     typer.echo(json.dumps(results, indent=2, ensure_ascii=False))
