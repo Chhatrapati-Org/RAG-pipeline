@@ -241,18 +241,10 @@ class MultiThreadedRetriever:
             # Hybrid search with prefetch (dense + sparse), then rerank with ColBERT
             # Fetch more results than needed to ensure unique filenames after grouping
             # Prefetch must be >= fetch_limit (funnel architecture)
-            
-            if self.use_reranker:
-                # With BGE reranker: Get more candidates for better reranking
-                prefetch_limit = self.top_k * 10  # Get 10x candidates
-                fetch_limit = self.top_k * 5      # ColBERT narrows to 5x
-                # Then BGE reranks these 5x results
-                # Finally unique filter gets top_k
-            else:
-                # Without reranker: Less aggressive prefetch
-                prefetch_limit = self.top_k * 5   # Get 5x candidates
-                fetch_limit = self.top_k * 3      # ColBERT narrows to 3x
-                # Then unique filter gets top_k
+
+            prefetch_limit = self.top_k * 5   # Get 5x candidates
+            fetch_limit = self.top_k * 3      # ColBERT narrows to 3x
+            # Then unique filter gets top_k
             
             prefetch = [
                 models.Prefetch(
