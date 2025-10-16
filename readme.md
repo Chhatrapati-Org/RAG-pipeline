@@ -1,7 +1,7 @@
 ### check results
 Query num = 54, 7044, 7048
 req answer = doc_32.txt, doc_4030.txt, 4031.txt
-Critical Query nums = 21, 29, 32, 57, 88, 7001, 7002, 7036, 7039, 7041, 7044, 7048, 7055, 7059, 7080, 7084, 7094
+Critical Query nums = _21, +29, 32, 57, 88, _7000, +7001, 7002, 7036, 7039, _7041, 7044, 7048, 7055, +7059, 7080, 7084, 7094
 
 # steps
 1. start venv

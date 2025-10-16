@@ -71,12 +71,29 @@ def retrieve(
         True, "--unique-files/--allow-duplicates", 
         help="Return only highest scoring chunk per unique filename"
     ),
+    use_reranker: bool = typer.Option(
+        True, "--rerank/--no-rerank",
+        help="Use BGE reranker to improve relevance scoring"
+    ),
 ):
     """
     Retrieve relevant documents for queries using hybrid search.
     
-    By default, returns unique filenames (highest scoring chunk per file).
-    Use --allow-duplicates to get top-k chunks regardless of filename.
+    Retrieval Pipeline:
+    1. Hybrid search (dense + sparse embeddings)
+    2. ColBERT late interaction scoring
+    3. BGE reranker (optional, enabled by default)
+    4. Unique filename filtering (optional, enabled by default)
+    
+    Examples:
+        # Default: with reranking and unique files
+        python cli.py retrieve queries.json my_collection -o results.json
+        
+        # Without reranking
+        python cli.py retrieve queries.json my_collection --no-rerank
+        
+        # Allow duplicate filenames
+        python cli.py retrieve queries.json my_collection --allow-duplicates
     """
     start = time.time()
     results = run_multithreaded_retrieval(
@@ -88,10 +105,11 @@ def retrieve(
         top_k=top_k,
         queries_per_batch=queries_per_batch,
         unique_per_filename=unique_files,
+        use_reranker=use_reranker,
     )
     end = time.time()
     typer.echo(json.dumps(results, indent=2, ensure_ascii=False))
-    typer.echo(f"Time taken: {(end - start) / 60} minutes")
+    typer.echo(f"Time taken: {(end - start) / 60:.2f} minutes")
 
 @app.command("embed-retrieve")
 def embed_retrieve():
@@ -103,7 +121,7 @@ def embed_retrieve():
         qdrant_client=qdrant_client,
         directory_path=directory_path,
         max_workers=15,
-        chunk_size_kb=1,
+        chunk_size_kb=0.5,
         files_per_batch=20,
     )
     end = time.time()
@@ -120,7 +138,7 @@ def embed_retrieve():
         queries_per_batch=20,
     )
     fin = time.time()
-    typer.echo(f"Time taken for retrieval: {fin - init / 60} minutes")
+    typer.echo(f"Time taken for retrieval: {(fin - init) / 60} minutes")
     # typer.echo(json.dumps(results, indent=2, ensure_ascii=False))
 
 

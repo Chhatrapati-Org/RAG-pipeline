@@ -8,6 +8,7 @@ import math
 
 import torch
 from fastembed import TextEmbedding, SparseTextEmbedding, LateInteractionTextEmbedding
+from fastembed.rerank.cross_encoder import TextCrossEncoder
 from langchain_community.utils.math import cosine_similarity
 from nltk.tokenize import sent_tokenize
 from qdrant_client.models import Distance, PointStruct, VectorParams, SparseVectorParams, Modifier, MultiVectorConfig, MultiVectorComparator, HnswConfigDiff
@@ -26,7 +27,7 @@ class SharedEmbeddingModel:
     _instance = None
     _dense_model = None
     _sparse_model = None
-    _reranker_model = None
+    _late_interaction_model = None
     _lock = Lock()
     _initialized = False
 
@@ -41,8 +42,8 @@ class SharedEmbeddingModel:
         self, 
         qdrant_client,
         dense_model_name: str = "BAAI/bge-base-en-v1.5",
-        sparse_model_name: str = "prithivida/Splade_PP_en_v1",
-        reranker_model_name: str = "colbert-ir/colbertv2.0"
+        sparse_model_name: str = "Qdrant/bm25", #"prithivida/Splade_PP_en_v1",
+        late_interaction_model_name: str = "colbert-ir/colbertv2.0", #"jinaai/jina-colbert-v2"
     ):
         with self._lock:
             if self._initialized:
@@ -51,7 +52,7 @@ class SharedEmbeddingModel:
             print("Initializing hybrid embedding models...")
             print(f"  Dense: {dense_model_name}")
             print(f"  Sparse: {sparse_model_name}")
-            print(f"  Reranker: {reranker_model_name}")
+            print(f"  late_interaction: {late_interaction_model_name}")
 
             try:
                 # Initialize dense embedding model
@@ -78,8 +79,8 @@ class SharedEmbeddingModel:
                     cache_dir="./model_cache"
                 )
                 
-                self._reranker_model = LateInteractionTextEmbedding(
-                    model_name=reranker_model_name,
+                self._late_interaction_model = LateInteractionTextEmbedding(
+                    model_name=late_interaction_model_name,
                     providers=providers,  # Use GPU if available
                     cache_dir="./model_cache"
                 )
@@ -87,15 +88,15 @@ class SharedEmbeddingModel:
                 test_text = ["Test sentence"]
                 test_dense = list(self._dense_model.embed(test_text))[0]
                 test_sparse = list(self._sparse_model.embed(test_text))[0]
-                test_reranker = list(self._reranker_model.embed(test_text))[0]
+                test_late_interaction = list(self._late_interaction_model.embed(test_text))[0]
 
                 dense_dim = len(test_dense)
-                reranker_dim = len(test_reranker[0])  # ColBERT produces multi-vectors
+                late_interaction_dim = len(test_late_interaction[0])  # ColBERT produces multi-vectors
                 
                 print(f"✅ Dense vectors: {dense_dim} dimensions")
-                print(f"✅ Reranker vectors: {reranker_dim} dimensions (multi-vector)")
+                print(f"✅ late_interaction vectors: {late_interaction_dim} dimensions (multi-vector)")
 
-                initialize_collection_if_needed(qdrant_client, dense_dim, reranker_dim)
+                initialize_collection_if_needed(qdrant_client, dense_dim, late_interaction_dim)
 
                 self._initialized = True
                 print("✅ All embedding models ready")
@@ -114,27 +115,27 @@ class SharedEmbeddingModel:
             raise RuntimeError("Models not initialized. Call initialize_model() first.")
         return self._sparse_model
 
-    def get_reranker_model(self):
-        if not self._initialized or self._reranker_model is None:
+    def get_late_interaction_model(self):
+        if not self._initialized or self._late_interaction_model is None:
             raise RuntimeError("Models not initialized. Call initialize_model() first.")
-        return self._reranker_model
+        return self._late_interaction_model
 
     def embed_documents(self, texts: List[str]) -> Tuple[List[List[float]], List[Any], List[List[List[float]]]]:
         """
         Generate all three types of embeddings for documents.
-        Returns: (dense_embeddings, sparse_embeddings, reranker_embeddings)
+        Returns: (dense_embeddings, sparse_embeddings, late_interaction_embeddings)
         """
         with self._lock:
             dense_model = self.get_dense_model()
             sparse_model = self.get_sparse_model()
-            reranker_model = self.get_reranker_model()
+            late_interaction_model = self.get_late_interaction_model()
             
             # Generate embeddings
             dense_embeddings = list(dense_model.embed(texts))
             sparse_embeddings = list(sparse_model.embed(texts))
-            reranker_embeddings = list(reranker_model.embed(texts))
+            late_interaction_embeddings = list(late_interaction_model.embed(texts))
             
-            return dense_embeddings, sparse_embeddings, reranker_embeddings
+            return dense_embeddings, sparse_embeddings, late_interaction_embeddings
 
 
     def embed_sentences(self, texts: List[str]) -> List[List[float]]:
@@ -150,12 +151,12 @@ class SharedEmbeddingModel:
             
             return dense_embeddings
 
-def initialize_collection_if_needed(client, dense_dim: int, reranker_dim: int):
+def initialize_collection_if_needed(client, dense_dim: int, late_interaction_dim: int):
     """Initialize Qdrant collection with hybrid search configuration."""
     if not client.collection_exists(COLLECTION_NAME):
         print(f"Creating Qdrant collection '{COLLECTION_NAME}' with hybrid search support")
         print(f"  Dense embedding: {dense_dim}D")
-        print(f"  Reranker embedding: {reranker_dim}D (multi-vector)")
+        print(f"  late_interaction embedding: {late_interaction_dim}D (multi-vector)")
         
         client.create_collection(
             collection_name=COLLECTION_NAME,
@@ -164,8 +165,8 @@ def initialize_collection_if_needed(client, dense_dim: int, reranker_dim: int):
                     size=dense_dim,
                     distance=Distance.COSINE,
                 ),
-                "reranker": VectorParams(
-                    size=reranker_dim,
+                "late_interaction": VectorParams(
+                    size=late_interaction_dim,
                     distance=Distance.COSINE,
                     multivector_config=MultiVectorConfig(
                         comparator=MultiVectorComparator.MAX_SIM,
@@ -209,7 +210,7 @@ class MergedRAGWorker:
         shared_model: SharedEmbeddingModel = None,
     ):
         self.worker_id = worker_id
-        self.chunk_size_bytes = chunk_size_kb * 1000
+        self.chunk_size_bytes = chunk_size_kb * 1024
         self.shared_model = shared_model if shared_model is not None else SharedEmbeddingModel()
         self.qdrant_client = qdrant_client
         self.point_id_counter = worker_id * 10000  # Unique ID range per worker
@@ -268,7 +269,7 @@ class MergedRAGWorker:
                         chunk_to_yield = re.sub(r"[\{\}\[\]]", " ", chunk_to_yield) # remove REMAINING brackets
                         chunk_to_yield = re.sub(r"\s+", " ", chunk_to_yield) # remove REMAINING whitespace
                         if len(chunk_to_yield.strip()) > 20:  # Yield only non-empty chunks
-                            if len(chunk_to_yield.encode('utf-8')) > 1024:
+                            if len(chunk_to_yield.encode('utf-8')) > self.chunk_size_bytes:
                                 yield from self._semantic_chunking_logic(chunk_to_yield, filename, chunk_id)
                                 chunk_id += 100
                             else:
@@ -428,7 +429,7 @@ class MergedRAGWorker:
         self, chunks: List[Tuple[str, str, int]]
     ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         """
-        Generate hybrid embeddings (dense, sparse, reranker) for chunks.
+        Generate hybrid embeddings (dense, sparse, late_interaction) for chunks.
         Returns: List of (embeddings_dict, payload_dict) tuples
         """
         if not chunks:
@@ -456,7 +457,7 @@ class MergedRAGWorker:
 
             try:
                 # Generate all three types of embeddings
-                dense_embeddings, sparse_embeddings, reranker_embeddings = self.shared_model.embed_documents(texts)
+                dense_embeddings, sparse_embeddings, late_interaction_embeddings = self.shared_model.embed_documents(texts)
                 
                 if not dense_embeddings or len(dense_embeddings) != len(texts):
                     print(
@@ -479,7 +480,7 @@ class MergedRAGWorker:
                 embeddings_dict = {
                     "dense_embedding": dense_embeddings[i],
                     "sparse_embedding": sparse_embeddings[i],
-                    "reranker": reranker_embeddings[i]
+                    "late_interaction": late_interaction_embeddings[i]
                 }
                 
                 payload = {
@@ -506,7 +507,7 @@ class MergedRAGWorker:
         self, embeddings_with_payloads: List[Tuple[Dict[str, Any], Dict[str, Any]]]
     ) -> int:
         """
-        Store hybrid embeddings (dense, sparse, reranker) in Qdrant.
+        Store hybrid embeddings (dense, sparse, late_interaction) in Qdrant.
         """
         if not embeddings_with_payloads:
             return 0
@@ -525,7 +526,7 @@ class MergedRAGWorker:
                         vector={
                             "dense_embedding": embeddings_dict["dense_embedding"],
                             "sparse_embedding": sparse_embedding.as_object(),
-                            "reranker": embeddings_dict["reranker"]
+                            "late_interaction": embeddings_dict["late_interaction"]
                         },
                         payload=payload,
                     )
