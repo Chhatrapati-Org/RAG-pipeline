@@ -264,7 +264,7 @@ class MultiThreadedRetriever:
                 collection_name=self.collection_name,
                 prefetch=prefetch,
                 query=late_interaction_vector,
-                using="late_interaction",
+                using="reranker",
                 with_payload=True,
                 limit=fetch_limit,  # Fetch more results for reranking
             )
@@ -310,7 +310,7 @@ class MultiThreadedRetriever:
                         # Sort by reranked scores (descending)
                         reranked_results.sort(key=lambda x: x[1], reverse=True)
                         
-                        print(f"Query {query_num}: Reranked {len(reranked_results)} results with BGE")
+                        # print(f"Query {query_num}: Reranked {len(reranked_results)} results with BGE")
             else:
                 # Use original scores from Qdrant
                 reranked_results = [
