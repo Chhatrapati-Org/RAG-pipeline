@@ -242,9 +242,9 @@ class MultiThreadedRetriever:
             # Fetch more results than needed to ensure unique filenames after grouping
             # Prefetch must be >= fetch_limit (funnel architecture)
 
-            prefetch_limit = self.top_k * 5   # Get 5x candidates
-            fetch_limit = self.top_k * 3      # ColBERT narrows to 3x
-            # Then unique filter gets top_k
+            prefetch_limit = self.top_k * 5   #  or x10
+            fetch_limit = self.top_k * 3      # or x5
+            # Then unique filter gets top_k = 5
             
             prefetch = [
                 models.Prefetch(
@@ -264,7 +264,7 @@ class MultiThreadedRetriever:
                 collection_name=self.collection_name,
                 prefetch=prefetch,
                 query=late_interaction_vector,
-                using="reranker",
+                using="late_interaction",
                 with_payload=True,
                 limit=fetch_limit,  # Fetch more results for reranking
             )

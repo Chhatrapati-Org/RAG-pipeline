@@ -24,6 +24,16 @@ def ingest_merged(
     chunk_size_kb: int = typer.Option(1, help="Max chunk size in KB"),
     files_per_batch: int = typer.Option(20, help="Files per worker batch"),
 ):
+    """
+    Embed and index documents using hybrid search (dense + sparse + late interaction).
+    This is the main ingestion pipeline for the RAG system.
+    """
+    typer.echo("🚀 Starting document embedding pipeline...\n")
+    typer.echo(f"📁 Input directory: {directory_path}")
+    typer.echo(f"⚙️  Workers: {max_workers}")
+    typer.echo(f"📦 Chunk size: {chunk_size_kb} KB")
+    typer.echo(f"📊 Files per batch: {files_per_batch}\n")
+    
     start = time.time()
     stats, _ = run_merged_rag_pipeline(
         qdrant_client=qdrant_client,
@@ -34,7 +44,13 @@ def ingest_merged(
     )
     end = time.time()
     stats['time_taken'] = (end - start) / 60  # in minutes
-    typer.echo(json.dumps(stats, indent=2))
+    
+    typer.echo("\n✅ Embedding pipeline completed!\n")
+    typer.echo("📊 Pipeline Statistics:")
+    typer.echo(f"  • Total files processed: {stats.get('total_files', 0)}")
+    typer.echo(f"  • Total chunks created: {stats.get('total_chunks', 0)}")
+    typer.echo(f"  • Time taken: {stats['time_taken']:.2f} minutes")
+    typer.echo(f"\n💾 Full statistics:\n{json.dumps(stats, indent=2)}")
 
 
 @app.command("embed-chunks")
@@ -44,6 +60,16 @@ def ingest_chunks(
     chunk_size_kb: int = typer.Option(1, help="Max chunk size in KB"),
     chunks_per_batch: int = typer.Option(50, help="Chunks per worker batch"),
 ):
+    """
+    Embed and index documents using chunk-based processing.
+    Alternative pipeline that processes chunks directly instead of files.
+    """
+    typer.echo("🚀 Starting chunk-based embedding pipeline...\n")
+    typer.echo(f"📁 Input directory: {directory_path}")
+    typer.echo(f"⚙️  Workers: {max_workers}")
+    typer.echo(f"📦 Chunk size: {chunk_size_kb} KB")
+    typer.echo(f"📊 Chunks per batch: {chunks_per_batch}\n")
+    
     start = time.time()
     stats = run_chunk_based_rag_pipeline(
         qdrant_client=qdrant_client,
@@ -54,15 +80,20 @@ def ingest_chunks(
     )
     end = time.time()
     stats['time_taken'] = (end - start) / 60  # in minutes
-    typer.echo(json.dumps(stats, indent=2))
+    
+    typer.echo("\n✅ Chunk-based embedding completed!\n")
+    typer.echo("📊 Pipeline Statistics:")
+    typer.echo(f"  • Total chunks processed: {stats.get('total_chunks', 0)}")
+    typer.echo(f"  • Time taken: {stats['time_taken']:.2f} minutes")
+    typer.echo(f"\n💾 Full statistics:\n{json.dumps(stats, indent=2)}")
 
 # TODO: Run DOCKER image of Qdrant if not running
 @app.command("retrieve")
 def retrieve(
     queries_file_path: str = typer.Argument(..., help="Path to queries JSON file"),
     collection_name: str = typer.Argument(..., help="Qdrant collection name"),
-    output_file_path: Optional[str] = typer.Option(
-        None, "--output", "-o", help="Path to save retrieval results JSON"
+    output_file_path: str = typer.Option(
+        "results.json", "--output", "-o", help="Path to save retrieval results JSON"
     ),
     max_workers: int = typer.Option(20, help="Number of worker threads"),
     top_k: int = typer.Option(5, help="Top-k similar chunks per query"),
@@ -113,9 +144,18 @@ def retrieve(
 
 @app.command("embed-retrieve")
 def embed_retrieve():
-    directory_path = input("Enter the Directory containing input files:")
-    queries_file_path = input("Enter the Path to queries JSON file:")
-    output_file_path = input("Enter the Path to save retrieval results JSON (Do not skip):")
+    """
+    Combined pipeline: Embed documents and then retrieve results for queries.
+    This command runs both ingestion and retrieval in sequence.
+    """
+    directory_path = input("Enter the Directory containing input files: ")
+    queries_file_path = input("Enter the Path to queries JSON file: ")
+    output_file_path = input("Enter the Path to save retrieval results JSON (Do not skip): ")
+    
+    typer.echo("\n" + "="*60)
+    typer.echo("STEP 1: EMBEDDING DOCUMENTS")
+    typer.echo("="*60)
+    
     start = time.time()
     stats, collection_name = run_merged_rag_pipeline(
         qdrant_client=qdrant_client,
@@ -126,7 +166,13 @@ def embed_retrieve():
     )
     end = time.time()
     stats['time_taken'] = (end - start) / 60  # in minutes
+    typer.echo("\n✅ Embedding completed:")
     typer.echo(json.dumps(stats, indent=2))
+    
+    typer.echo("\n" + "="*60)
+    typer.echo("STEP 2: RETRIEVING DOCUMENTS")
+    typer.echo("="*60)
+    
     init = time.time()
     results = run_multithreaded_retrieval(
         COLLECTION_NAME=collection_name,
@@ -138,8 +184,10 @@ def embed_retrieve():
         queries_per_batch=20,
     )
     fin = time.time()
-    typer.echo(f"Time taken for retrieval: {(fin - init) / 60} minutes")
-    # typer.echo(json.dumps(results, indent=2, ensure_ascii=False))
+    
+    typer.echo(f"\n✅ Retrieval completed in {(fin - init) / 60:.2f} minutes")
+    typer.echo(f"📊 Total time (embedding + retrieval): {(fin - start) / 60:.2f} minutes")
+    typer.echo(f"💾 Results saved to: {output_file_path}")
 
 
 # TODO: Start the ollama server if not running
@@ -166,40 +214,61 @@ def export_results(
     results_file: str = typer.Argument(..., help="Path to retrieval results JSON"),
     output_dir: str = typer.Argument(..., help="Directory to write per-query JSONs"),
     zip_name: Optional[str] = typer.Option(
-        None,
+        "Astraq Cyber Defence_PS4.zip",
         "--zip-name",
-        help="Optional name for the zip archive to create in output_dir",
+        help="Name for the zip archive to create in output_dir",
     ),
 ):
+    """
+    Export retrieval results to individual JSON files and optionally create a zip archive.
+    Each query gets its own JSON file named by query number.
+    """
     results_path = Path(results_file)
     out_dir = Path(output_dir)
+    
+    # Create output directory if it doesn't exist
+    out_dir.mkdir(parents=True, exist_ok=True)
 
+    typer.echo(f"📖 Loading results from: {results_path}")
     with results_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
     if not isinstance(data, list):
         raise typer.BadParameter("Results file must contain a list of results")
 
-    for item in typer.progressbar(data, label="Exporting files"):
-        query_num = item.get("query_num")
-        if query_num is None:
-            continue
-        item_copy = dict(item)
-        new_item = {}
-        new_item['query'] = item_copy['query']
-        new_item['response'] = item_copy['response']
-        output_file = out_dir / f"{query_num}.json"
-        _write_json(new_item, output_file)
+    typer.echo(f"📝 Exporting {len(data)} queries to {out_dir}")
+    
+    exported_count = 0
+    with typer.progressbar(data, label="Exporting query files") as progress:
+        for item in progress:
+            query_num = item.get("query_num")
+            if query_num is None:
+                continue
+            item_copy = dict(item)
+            new_item = {}
+            new_item['query'] = item_copy['query']
+            new_item['response'] = item_copy['response']
+            output_file = out_dir / f"{query_num}.json"
+            _write_json(new_item, output_file)
+            exported_count += 1
+    
+    typer.echo(f"✅ Exported {exported_count} query files")
 
     if zip_name:
         zip_path = out_dir / zip_name
         if not zip_path.name.lower().endswith(".zip"):
             zip_path = zip_path.with_suffix(".zip")
-        with zipfile.ZipFile(zip_path, "w") as zip_ref:
-            for file in out_dir.iterdir():
-                if file.suffix.lower() == ".json":
+        
+        typer.echo(f"📦 Creating zip archive: {zip_path.name}")
+        
+        json_files = [f for f in out_dir.iterdir() if f.suffix.lower() == ".json"]
+        with typer.progressbar(json_files, label="Compressing files") as progress:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_ref:
+                for file in progress:
                     zip_ref.write(file, arcname=file.name)
-        typer.echo(f"Created zip: {zip_path}")
+        
+        typer.echo(f"✅ Created zip archive: {zip_path}")
+        typer.echo(f"📊 Archive contains {len(json_files)} files")
 
 
 @app.command("preprocess")
@@ -208,26 +277,49 @@ def preprocess_dir(
     output_dir: str = typer.Argument(..., help="Directory to write processed files"),
     glob: str = typer.Option("*", help="Glob to select files within input_dir"),
 ):
+    """
+    Preprocess text files by cleaning and normalizing content.
+    Applies text cleaning, whitespace normalization, and other preprocessing steps.
+    """
     src = Path(input_dir)
     dst = Path(output_dir)
+    
     if not src.exists() or not src.is_dir():
         raise typer.BadParameter(f"Input directory not found: {input_dir}")
+    
+    # Create output directory if it doesn't exist
+    dst.mkdir(parents=True, exist_ok=True)
 
     files: List[Path] = sorted(src.glob(glob))
     if not files:
-        typer.echo("No files matched.")
+        typer.echo("⚠️  No files matched the pattern.")
         raise typer.Exit(code=0)
 
-    for fp in typer.progressbar(files, label="Preprocessing files"):
-        if not fp.is_file():
-            continue
-        with fp.open("r", encoding="utf-8", errors="ignore") as f:
-            raw = f.read()
-        processed = preprocess_chunk_text(raw)
-        out_fp = dst / fp.name
-        out_fp.parent.mkdir(parents=True, exist_ok=True)
-        with out_fp.open("w", encoding="utf-8") as f:
-            f.write(processed)
+    typer.echo(f"📁 Input directory: {src}")
+    typer.echo(f"📂 Output directory: {dst}")
+    typer.echo(f"🔍 Pattern: {glob}")
+    typer.echo(f"📊 Found {len(files)} files to process\n")
+    
+    processed_count = 0
+    with typer.progressbar(files, label="Preprocessing files") as progress:
+        for fp in progress:
+            if not fp.is_file():
+                continue
+            try:
+                with fp.open("r", encoding="utf-8", errors="ignore") as f:
+                    raw = f.read()
+                processed = preprocess_chunk_text(raw)
+                out_fp = dst / fp.name
+                out_fp.parent.mkdir(parents=True, exist_ok=True)
+                with out_fp.open("w", encoding="utf-8") as f:
+                    f.write(processed)
+                processed_count += 1
+            except Exception as e:
+                typer.echo(f"\n⚠️  Error processing {fp.name}: {e}")
+                continue
+    
+    typer.echo(f"\n✅ Successfully preprocessed {processed_count} files")
+    typer.echo(f"📂 Output saved to: {dst}")
 
 
 def main():
