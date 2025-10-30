@@ -8,6 +8,7 @@ import typer
 from qdrant_client import QdrantClient
 
 from rag.evaluate import RAGEvaluator
+from rag.generate import RAGGenerator
 from rag.pipeline import run_chunk_based_rag_pipeline, run_merged_rag_pipeline
 from rag.preprocess import preprocess_chunk_text
 from rag.retrieve import run_multithreaded_retrieval
@@ -191,11 +192,69 @@ def embed_retrieve():
 
 
 # TODO: Start the ollama server if not running
+@app.command("generate")
+def generate(
+    results_file: str = typer.Argument(..., help="Path to retrieval results JSON"),
+    output_file: Optional[str] = typer.Option(
+        None, "--output", "-o", help="Path to save generated answers JSON"
+    ),
+    model: str = typer.Option("llama3.1:8b", "--model", "-m", help="Ollama model name"),
+    temperature: float = typer.Option(0.3, "--temperature", "-t", help="Sampling temperature (0.0-1.0)"),
+    max_chunks: int = typer.Option(5, "--max-chunks", help="Maximum chunks to use per query"),
+):
+    """
+    Generate answers for queries using retrieved chunks and Ollama LLM.
+    
+    Takes retrieval results JSON and generates comprehensive answers by synthesizing
+    information from the retrieved text chunks.
+    
+    Examples:
+        # Generate answers and display in console
+        python cli.py generate results.json -m llama3.1:8b
+        
+        # Generate and save to file
+        python cli.py generate results.json -o answers.json
+        
+        # Use different model with higher temperature
+        python cli.py generate results.json -m llama3.2:3b -t 0.5
+    """
+    typer.echo(f"🤖 Generating answers using model: {model}")
+    typer.echo(f"📖 Reading retrieval results from: {results_file}")
+    typer.echo(f"🌡️  Temperature: {temperature}")
+    typer.echo(f"📊 Max chunks per query: {max_chunks}\n")
+    
+    start = time.time()
+    generator = RAGGenerator(model_name=model, temperature=temperature)
+    results = generator.generate(
+        data_or_path=results_file,
+        output_path=output_file,
+        max_chunks=max_chunks
+    )
+    end = time.time()
+    
+    # Display summary
+    typer.echo(f"\n✅ Generated {len(results)} answers in {(end - start) / 60:.2f} minutes")
+    
+    if output_file:
+        typer.echo(f"💾 Answers saved to: {output_file}")
+    else:
+        typer.echo("\n📋 Generated Answers:\n")
+        for result in results:
+            typer.echo(f"Query {result['query_num']}: {result['query']}")
+            typer.echo(f"Answer: {result['answer'][:200]}...")
+            typer.echo(f"Sources: {', '.join(result['sources'][:3])}")
+            typer.echo("-" * 80)
+
+
 @app.command("evaluate")
 def evaluate(
     results_file: str = typer.Argument(..., help="Path to retrieval results JSON"),
     model: str = typer.Option("llama3.1:8b", "--model", "-m", help="Ollama model name"),
 ):
+    """
+    Evaluate retrieval quality by judging chunk relevance.
+    Uses a small model to assess if retrieved chunks are relevant to queries.
+    """
     evaluator = RAGEvaluator(model_name=model)
     with Path(results_file).open("r", encoding="utf-8") as f:
         data = json.load(f)
