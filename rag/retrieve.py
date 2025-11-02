@@ -242,7 +242,7 @@ class MultiThreadedRetriever:
             # Fetch more results than needed to ensure unique filenames after grouping
             # Prefetch must be >= fetch_limit (funnel architecture)
 
-            prefetch_limit = self.top_k * 5   #  or x10
+            prefetch_limit = self.top_k * 6   #  or x10
             fetch_limit = self.top_k * 3      # or x5
             # Then unique filter gets top_k = 5
             
