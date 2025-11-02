@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, Optional
 import time
 import typer
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from qdrant_client import QdrantClient
 
 from rag.evaluate import RAGEvaluator
@@ -149,10 +150,10 @@ def embed_retrieve():
     Combined pipeline: Embed documents and then retrieve results for queries.
     This command runs both ingestion and retrieval in sequence.
     """
-    directory_path = input("Enter the Directory containing input files: ")
-    queries_file_path = input("Enter the Path to queries JSON file: ")
-    output_file_path = input("Enter the Path to save retrieval results JSON (Do not skip): ")
-    
+    directory_path = input("Enter the Directory containing input files: ").strip('\"')
+    queries_file_path = input("Enter the Path to queries JSON file: ").strip('\"')
+    output_file_path = input("Enter the Path to save retrieval results JSON (Do not skip): ").strip('\"')
+
     typer.echo("\n" + "="*60)
     typer.echo("STEP 1: EMBEDDING DOCUMENTS")
     typer.echo("="*60)
@@ -330,19 +331,47 @@ def export_results(
         typer.echo(f"📊 Archive contains {len(json_files)} files")
 
 
+def _preprocess_batch(batch: List[Path], dst: Path) -> tuple[int, List[str]]:
+    """
+    Preprocess a batch of files. Returns (success_count, failed_files).
+    """
+    success_count = 0
+    failed_files = []
+    
+    for fp in batch:
+        if not fp.is_file():
+            continue
+        
+        try:
+            with fp.open("r", encoding="utf-8", errors="ignore") as f:
+                raw = f.read()
+            processed = preprocess_chunk_text(raw)
+            out_fp = dst / fp.name
+            out_fp.parent.mkdir(parents=True, exist_ok=True)
+            with out_fp.open("w", encoding="utf-8") as f:
+                f.write(processed)
+            success_count += 1
+        except Exception as e:
+            failed_files.append(f"{fp.name}: {e}")
+    
+    return success_count, failed_files
+
+
 @app.command("preprocess")
 def preprocess_dir(
     input_dir: str = typer.Argument(..., help="Directory with input files"),
     output_dir: str = typer.Argument(..., help="Directory to write processed files"),
     glob: str = typer.Option("*", help="Glob to select files within input_dir"),
+    max_workers: int = typer.Option(10, help="Number of worker threads"),
+    files_per_batch: int = typer.Option(20, help="Files per worker batch"),
 ):
     """
-    Preprocess text files by cleaning and normalizing content.
+    Preprocess text files by cleaning and normalizing content (multithreaded with batching).
     Applies text cleaning, whitespace normalization, and other preprocessing steps.
     """
     src = Path(input_dir)
     dst = Path(output_dir)
-    
+    start = time.time()
     if not src.exists() or not src.is_dir():
         raise typer.BadParameter(f"Input directory not found: {input_dir}")
     
@@ -354,30 +383,48 @@ def preprocess_dir(
         typer.echo("⚠️  No files matched the pattern.")
         raise typer.Exit(code=0)
 
+    # Create batches
+    batches = [files[i:i + files_per_batch] for i in range(0, len(files), files_per_batch)]
+
     typer.echo(f"📁 Input directory: {src}")
     typer.echo(f"📂 Output directory: {dst}")
     typer.echo(f"🔍 Pattern: {glob}")
-    typer.echo(f"📊 Found {len(files)} files to process\n")
+    typer.echo(f"📊 Found {len(files)} files to process")
+    typer.echo(f"📦 Batches: {len(batches)} ({files_per_batch} files per batch)")
+    typer.echo(f"⚙️  Workers: {max_workers}\n")
     
     processed_count = 0
-    with typer.progressbar(files, label="Preprocessing files") as progress:
-        for fp in progress:
-            if not fp.is_file():
-                continue
-            try:
-                with fp.open("r", encoding="utf-8", errors="ignore") as f:
-                    raw = f.read()
-                processed = preprocess_chunk_text(raw)
-                out_fp = dst / fp.name
-                out_fp.parent.mkdir(parents=True, exist_ok=True)
-                with out_fp.open("w", encoding="utf-8") as f:
-                    f.write(processed)
-                processed_count += 1
-            except Exception as e:
-                typer.echo(f"\n⚠️  Error processing {fp.name}: {e}")
-                continue
+    failed_files = []
     
-    typer.echo(f"\n✅ Successfully preprocessed {processed_count} files")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit batch tasks
+        future_to_batch = {
+            executor.submit(_preprocess_batch, batch, dst): batch 
+            for batch in batches
+        }
+        
+        # Process results as they complete
+        with typer.progressbar(
+            length=len(files), 
+            label="Preprocessing files"
+        ) as progress:
+            for future in as_completed(future_to_batch):
+                success_count, batch_failed = future.result()
+                processed_count += success_count
+                failed_files.extend(batch_failed)
+                # Update progress by the batch size
+                progress.update(len(future_to_batch[future]))
+    
+    typer.echo(f"\n✅ Successfully preprocessed {processed_count}/{len(files)} files")
+    
+    if failed_files:
+        typer.echo(f"\n⚠️  Failed to process {len(failed_files)} files:")
+        for failed in failed_files[:5]:  # Show first 5 failures
+            typer.echo(f"  • {failed}")
+        if len(failed_files) > 5:
+            typer.echo(f"  ... and {len(failed_files) - 5} more")
+    end = time.time()
+    typer.echo(f"\n✅ Preprocessed {len(files)} answers in {(end - start) / 60:.2f} minutes")
     typer.echo(f"📂 Output saved to: {dst}")
 
 
