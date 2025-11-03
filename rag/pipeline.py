@@ -191,6 +191,16 @@ def initialize_collection_if_needed(client, dense_dim: int, late_interaction_dim
             print(f"Error checking collection: {e}")
 
 
+def lazy_read(file_handle, chunk_size_kb=4):
+    chunk_size_bytes = chunk_size_kb * 1024
+
+    while True:
+        chunk = file_handle.read(chunk_size_bytes)
+        if not chunk:
+            break
+        yield chunk
+
+
 class MergedRAGWorker:
     def __init__(
         self,
@@ -239,34 +249,32 @@ class MergedRAGWorker:
         filename = os.path.basename(file_path)
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            
-            chunk_id = 0
-            # Process the entire file content
-            content = " " + content
-            root = parser(content)
-            
-            def chunks_in(node, text):
-                if node.children:
-                    lst = []
-                    for child in node.children:
-                        lst.extend(chunks_in(child, text))
-                    return lst
-                else:
-                    part = text[node.start+1:node.end]
-                    return [part]
-            
-            chunklets = chunks_in(root, content)
-            for chunk_to_yield in chunklets:
-                chunk_to_yield = re.sub(r"[\{\}\[\]]", " ", chunk_to_yield) # remove REMAINING brackets
-                chunk_to_yield = re.sub(r"\s+", " ", chunk_to_yield) # remove REMAINING whitespace
-                if len(chunk_to_yield.strip()) > 20:  # Yield only non-empty chunks
-                    if len(chunk_to_yield.encode('utf-8')) > self.chunk_size_bytes:
-                        yield from self._semantic_chunking_logic(chunk_to_yield, filename, chunk_id)
-                        chunk_id += 100
-                    else:
-                        yield (chunk_to_yield, filename, chunk_id)
-                        chunk_id += 1
+                chunk_id = 0
+                for chunk in lazy_read(f, chunk_size_kb=4):
+                    chunk = " " + chunk
+                    root = parser(chunk)
+                    
+                    def chunks_in(node, chunk):
+                        if node.children:
+                            lst = []
+                            for child in node.children:
+                                lst.extend(chunks_in(child, chunk))
+                            return lst
+                        else:
+                            part = chunk[node.start+1:node.end]
+                            return [part]
+                    
+                    chunklets = chunks_in(root, chunk)
+                    for chunk_to_yield in chunklets:
+                        chunk_to_yield = re.sub(r"[\{\}\[\]]", " ", chunk_to_yield) # remove REMAINING brackets
+                        chunk_to_yield = re.sub(r"\s+", " ", chunk_to_yield) # remove REMAINING whitespace
+                        if len(chunk_to_yield.strip()) > 20:  # Yield only non-empty chunks
+                            if len(chunk_to_yield.encode('utf-8')) > self.chunk_size_bytes:
+                                yield from self._semantic_chunking_logic(chunk_to_yield, filename, chunk_id)
+                                chunk_id += 100
+                            else:
+                                yield (chunk_to_yield, filename, chunk_id)
+                                chunk_id += 1
 
         except Exception as e:
             print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
@@ -279,33 +287,30 @@ class MergedRAGWorker:
         overlap = 2
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            
-            chunk_id = 0
-            # Process the entire file content
-            sentences = []
-            for sentence in sent_tokenize(content):
-                sentences.append(sentence.strip())
-            
-            big_sentences = []
-            for i in range(len(sentences)):
-                if i == len(sentences) - 1:
-                    big_sentences.append(sentences[i])
-                    break
-                if len(sentences[i]) < 25:
-                    sentences[i + 1] = sentences[i] + " " + sentences[i + 1]
-                else:
-                    big_sentences.append(sentences[i])
+                chunk_id = 0
+                for chunk in lazy_read(f, chunk_size_kb=self.chunk_size_bytes // 1024):
+                    sentences = []
+                    for sentence in sent_tokenize(chunk):
+                        sentences.append(sentence.strip())
+                    big_sentences = []
+                    for i in range(len(sentences)):
+                        if i == len(sentences) - 1:
+                            big_sentences.append(sentences[i])
+                            break
+                        if len(sentences[i]) < 25:
+                            sentences[i + 1] = sentences[i] + " " + sentences[i + 1]
+                        else:
+                            big_sentences.append(sentences[i])
 
-            sentences = big_sentences
-            i = 0
-            while True:
-                chunk_to_yield = " ".join(sentences[i : i + num_sent])
-                yield (chunk_to_yield, filename, chunk_id)
-                chunk_id += 1
-                i += num_sent - overlap
-                if i >= len(sentences):
-                    break
+                    sentences = big_sentences
+                    i = 0
+                    while True:
+                        chunk_to_yield = " ".join(sentences[i : i + num_sent])
+                        yield (chunk_to_yield, filename, chunk_id)
+                        chunk_id += 1
+                        i += num_sent - overlap
+                        if i >= len(sentences):
+                            break
 
         except Exception as e:
             print(f"Worker {self.worker_id}: Error reading {filename}: {e}")
@@ -316,11 +321,11 @@ class MergedRAGWorker:
         filename = os.path.basename(file_path)
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            
-            chunk_id = 0
-            # Process the entire file content
-            yield from self._semantic_chunking_logic(content, filename, chunk_id)
+                chunk_id = 0
+                # Lazily create chunks for memory and time efficiency
+                for chunk in lazy_read(f, chunk_size_kb=self.chunk_size_bytes // 1024):
+                    yield from self._semantic_chunking_logic(chunk, filename, chunk_id)
+                    chunk_id += 100
         except Exception as e:
             print(f"Error reading {filename}: {e}")
 
