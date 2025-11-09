@@ -9,10 +9,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from qdrant_client import QdrantClient
 
 from rag.evaluate import RAGEvaluator
-from rag.generate import RAGGenerator
+from rag.generate import RAGGenerator, generate_single_answer
 from rag.pipeline import run_chunk_based_rag_pipeline, run_merged_rag_pipeline
 from rag.preprocess import preprocess_chunk_text
-from rag.retrieve import run_multithreaded_retrieval
+from rag.retrieve import run_multithreaded_retrieval, single_retrieval
 
 app = typer.Typer(help="CLI for PS04 RAG: ingest, retrieve, preprocess, and export.")
 
@@ -245,6 +245,76 @@ def generate(
             typer.echo(f"Answer: {result['answer'][:200]}...")
             typer.echo(f"Sources: {', '.join(result['sources'][:3])}")
             typer.echo("-" * 80)
+
+
+@app.command("query")
+def ask_query(    
+    query: str = typer.Argument(..., help="Query string to search for"),
+    collection_name: str = typer.Argument(..., help="Qdrant collection name"),
+    model: str = typer.Option("llama3.1:8b", "--model", "-m", help="Ollama model name"),
+    temperature: float = typer.Option(0.3, "--temperature", "-t", help="Sampling temperature (0.0-1.0)"),
+    max_chunks: int = typer.Option(5, "--max-chunks", help="Maximum chunks to use per query"),
+):
+    """
+    Combined pipeline: Retrieve results for a query and generate a suitable answer.
+    This command runs both retrieval and generation in sequence.
+    Works with only one query.
+    
+    Examples:
+        python cli.py query "What is machine learning?" my_collection
+        python cli.py query "Explain RAG systems" my_collection -m llama3.2:3b -t 0.5
+    """
+    typer.echo("\n" + "="*60)
+    typer.echo("STEP 1: RETRIEVING DOCUMENTS")
+    typer.echo("="*60)
+    typer.echo(f"📖 Query: {query}")
+    typer.echo(f"📊 Collection: {collection_name}\n")
+    
+    start = time.time()
+    retrieval_result = single_retrieval(
+        COLLECTION_NAME=collection_name,
+        qdrant_client=qdrant_client,
+        query=query,
+        max_workers=10,
+        top_k=5,
+        queries_per_batch=20,
+    )    
+    typer.echo(f"\n✅ Retrieval completed in {(retrieval_time - start):.2f} seconds")
+    typer.echo(f"📂 Found {len(retrieval_result.get('response', []))} relevant documents\n")
+    
+    typer.echo("="*60)
+    typer.echo("STEP 2: GENERATING ANSWER")
+    typer.echo("="*60)
+    typer.echo(f"🤖 Model: {model}")
+    typer.echo(f"🌡️  Temperature: {temperature}\n")
+    
+    # Generate answer using the new function
+    answer_result = generate_single_answer(
+        retrieval_result=retrieval_result,
+        model_name=model,
+        temperature=temperature,
+        max_chunks=max_chunks
+    )
+    
+    end = time.time()
+    
+    typer.echo(f"📊 Total time: {(end - start):.2f} seconds\n")
+    
+    # Display results
+    typer.echo("="*60)
+    typer.echo("ANSWER")
+    typer.echo("="*60)
+    typer.echo(f"\n{answer_result['answer']}\n")
+    
+    typer.echo("="*60)
+    typer.echo("SOURCES")
+    typer.echo("="*60)
+    for i, source in enumerate(answer_result.get('sources', []), 1):
+        score = answer_result.get('chunk_scores', [0])[i-1] if i-1 < len(answer_result.get('chunk_scores', [])) else 0
+        typer.echo(f"{i}. {source} (score: {score:.4f})")
+    
+    typer.echo()
+
 
 
 @app.command("evaluate")

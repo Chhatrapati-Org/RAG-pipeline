@@ -377,6 +377,27 @@ class MultiThreadedRetriever:
         # print(f"Worker {batch_id}: Completed {len(results)} queries")
         return results
 
+    def process_single_query(self, query: str) -> Dict[str, Any]:
+        """
+        Process a single query string and return retrieval results.
+        
+        Args:
+            query: The query text to search for
+            
+        Returns:
+            Dictionary containing query results with chunks and metadata
+        """
+        # Create query data dict with a default query_num
+        query_data = {
+            "query_num": "1",
+            "query": query
+        }
+        
+        # Call the internal processing method
+        result = self._process_single_query(query_data)
+        
+        return result
+
     def process_queries(
         self, queries_file_path: str, output_file_path: str = None
     ) -> List[Dict[str, Any]]:
@@ -511,3 +532,27 @@ def run_multithreaded_retrieval(
     )
 
     return retriever.process_queries(queries_file_path, output_file_path)
+
+
+def single_retrieval(
+    COLLECTION_NAME,
+    qdrant_client,
+    query,
+    max_workers: int = 16,
+    top_k: int = 5,
+    queries_per_batch: int = 20,
+    unique_per_filename: bool = True,  # Enable unique filename filtering
+    use_reranker: bool = True,  # Enable BGE reranker
+) -> Dict[str, Any]:
+        
+    retriever = MultiThreadedRetriever(
+    COLLECTION_NAME=COLLECTION_NAME,
+    qdrant_client=qdrant_client,
+    max_workers=max_workers,
+    top_k=top_k,
+    queries_per_batch=queries_per_batch,
+    unique_per_filename=unique_per_filename,
+    use_reranker=use_reranker,
+    )
+
+    return retriever.process_single_query(query)

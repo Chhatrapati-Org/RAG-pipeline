@@ -270,6 +270,65 @@ Answer:"""
             yield f"Error generating answer: {str(e)}"
 
 
+def generate_single_answer(
+    retrieval_result: Dict[str, Any],
+    model_name: str = "llama3.1:8b",
+    temperature: float = 0.3,
+    max_chunks: int = 5
+) -> Dict[str, Any]:
+    """
+    Generate answer for a single query from its retrieval result.
+    
+    Args:
+        retrieval_result: Dict containing query and retrieved chunks
+                         (output from single_retrieval or process_single_query)
+        model_name: Ollama model to use
+        temperature: Sampling temperature
+        max_chunks: Maximum chunks to use
+        
+    Returns:
+        Dict with query, answer, sources, and metadata
+    """
+    generator = RAGGenerator(model_name=model_name, temperature=temperature)
+    
+    # Extract query
+    query = retrieval_result.get("query", "").strip()
+    query_num = retrieval_result.get("query_num", "1")
+    
+    if not query:
+        return {
+            "query_num": query_num,
+            "query": query,
+            "answer": "Empty query provided.",
+            "num_chunks_used": 0,
+            "sources": [],
+        }
+    
+    # Extract chunks from retrieval result
+    chunks = generator._extract_chunks(retrieval_result, max_chunks=max_chunks)
+    
+    if not chunks:
+        return {
+            "query_num": query_num,
+            "query": query,
+            "answer": "No relevant information found to answer this query.",
+            "num_chunks_used": 0,
+            "sources": [],
+        }
+    
+    # Generate answer
+    answer = generator._generate_answer(query, chunks)
+    
+    return {
+        "query_num": query_num,
+        "query": query,
+        "answer": answer,
+        "num_chunks_used": len(chunks),
+        "sources": [chunk["filename"] for chunk in chunks],
+        "chunk_scores": [chunk["score"] for chunk in chunks],
+    }
+
+
 def generate_answers(
     retrieval_results_path: str,
     output_path: Optional[str] = None,
